@@ -24,7 +24,7 @@ await call(tmp.cookie, "POST", `/api/posts/${tmpPost.id}/comments`, { body: "fir
 
 await withPage({ login: "ekta", fakeMic: true, reducedMotion: true, w: 1280, h: 800 }, async (p) => {
   await p.goto("/app");
-  await p.waitFor("document.querySelector('nav[aria-label=Conversations] button')", "app to load", 40000);
+  await p.waitFor("document.querySelector('nav[aria-label=Conversations] [role=button]')", "app to load", 40000);
   await p.wait(2500);
 
   const apiGet = (path) => p.eval(`fetch(${JSON.stringify(path)}).then(r=>r.json())`);
@@ -33,7 +33,7 @@ await withPage({ login: "ekta", fakeMic: true, reducedMotion: true, w: 1280, h: 
   let friendCount = 0;
 
   await step("open chat", async () => {
-    await p.clickText("nav[aria-label=Conversations] button", "Mika");
+    await p.clickText("nav[aria-label=Conversations] [role=button]", "Mika");
     await p.waitFor(composer, "composer", 40000);
     await p.wait(1500);
     check("open Mika's chat", await p.eval("!!document.querySelector('[id^=m-]')"));
@@ -194,7 +194,7 @@ await withPage({ login: "ekta", fakeMic: true, reducedMotion: true, w: 1280, h: 
     check("their post disappears from my feed", !(await apiGet("/api/feed")).posts.some((x) => x.id === tmpPost.id));
     await p.click("button[aria-label=Chats]");
     await p.wait(800);
-    check("DM with Tempo is gone from Chats", await p.eval("![...document.querySelectorAll('nav[aria-label=Conversations] button')].some(b=>b.textContent.includes('Tempo'))"));
+    check("DM with Tempo is gone from Chats", await p.eval("![...document.querySelectorAll('nav[aria-label=Conversations] [role=button]')].some(b=>b.textContent.includes('Tempo'))"));
   });
 
   const errs = [...new Set(p.logs.filter((l) => l.startsWith("EXCEPTION")))];

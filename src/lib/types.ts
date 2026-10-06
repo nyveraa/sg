@@ -1,14 +1,24 @@
+import type { Prefs } from "./prefs";
+export type { Prefs } from "./prefs";
+
 export type User = {
   id: string;
   username: string;
   displayName: string;
   bio: string;
+  status: string; // short "what I am up to" line
+  pronouns: string;
+  avatar: string | null; // small JPEG data URL
   hue: number; // legacy column; the brand is monochrome so this is unused by the UI
-  online: boolean;
+  online: boolean; // already respects the person's privacy setting
+  lastSeen: number | null; // null when hidden or unknown
+  realName?: string; // client-only: set when displayName has been replaced by your private nickname
 };
+/** The signed-in user: same as User but with real presence and their preferences. */
+export type Me = User & { prefs: Prefs };
 
 export type MessageKind =
-  | "text" | "image" | "voice" | "system" | "roll" | "flip" | "ball" | "poll" | "ttt" | "c4" | "rps" | "prompt" | "effect";
+  | "text" | "image" | "voice" | "spin" | "system" | "roll" | "flip" | "ball" | "poll" | "ttt" | "c4" | "rps" | "prompt" | "effect";
 
 export type Effect = "confetti" | "hearts" | "fire" | "boom" | "snow" | "stars";
 export const EFFECTS: Effect[] = ["confetti", "hearts", "fire", "boom", "snow", "stars"];
@@ -34,6 +44,7 @@ export type RpsData = {
 };
 export type PromptData = { type: "truth" | "dare"; text: string };
 export type VoiceData = { duration: number; peaks: number[] };
+export type SpinData = { question: string; memberIds: string[]; winnerId: string };
 export type RollData = { sides: number; result: number };
 export type FlipData = { result: "heads" | "tails" };
 export type BallData = { question: string; answer: string };
@@ -51,6 +62,8 @@ export type Message = {
   editedAt: number | null;
   deleted: boolean;
   reactions: Reaction[];
+  pending?: boolean; // client-only: shown instantly, awaiting the server
+  failed?: boolean; // client-only: the server rejected / the network dropped it
 };
 
 export type Conversation = {
@@ -58,8 +71,12 @@ export type Conversation = {
   kind: "dm" | "group";
   title: string | null;
   memberIds: string[];
-  reads: Record<string, number>; // userId -> last read message id
+  reads: Record<string, number>; // userId -> last read message id (0 when receipts are off for either side)
   unread: number;
+  pinned: boolean; // these three are per-viewer
+  muted: boolean;
+  archived: boolean;
+  streak: number; // consecutive days both people wrote (DMs)
   last: Message | null;
   updatedAt: number;
 };
@@ -84,15 +101,18 @@ export type InviteRow = {
   usedBy: { displayName: string; username: string } | null;
 };
 
-export type Bootstrap = { me: User; users: User[]; conversations: Conversation[] };
+export type StoryView = { user: User; at: number };
+export type Bootstrap = { me: Me; users: User[]; conversations: Conversation[]; nicknames: Record<string, string> };
 
 export type ServerEvent =
   | { type: "message"; message: Message }
   | { type: "message_update"; message: Message }
   | { type: "read"; convId: string; userId: string; lastReadId: number }
   | { type: "typing"; convId: string; userId: string }
-  | { type: "presence"; userId: string; online: boolean }
+  | { type: "presence"; userId: string; online: boolean; lastSeen: number | null }
   | { type: "user"; user: User }
+  | { type: "me"; me: Me }
+  | { type: "conversation_removed"; convId: string }
   | { type: "conversation"; conversation: Conversation; users: User[]; celebrate?: string }
   | { type: "post"; post: Post }
   | { type: "post_update"; post: Post }

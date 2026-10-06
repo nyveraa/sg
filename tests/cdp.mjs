@@ -75,7 +75,7 @@ export async function withPage({ w = 1440, h = 900, mobile = false, login, passw
       },
       mouse: (type, x, y) => send("Input.dispatchMouseEvent", { type, x, y, button: "left", buttons: type === "mouseReleased" ? 0 : 1, clickCount: 1 }),
       rect: (sel) => evalJs(`(()=>{const e=document.querySelector(${JSON.stringify(sel)});if(!e)return null;const r=e.getBoundingClientRect();return {x:r.x,y:r.y,w:r.width,h:r.height}})()`),
-      shot: async (file) => { const s = await send("Page.captureScreenshot", { format: "png" }); fs.writeFileSync(file, Buffer.from(s.data, "base64")); },
+      shot: async (file) => { const s = await send("Page.captureScreenshot", { format: "png" }); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, Buffer.from(s.data, "base64")); },
     };
     const out = await fn(page);
     ws.close();

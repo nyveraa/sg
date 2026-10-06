@@ -1,15 +1,19 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { OnyxProvider, useOnyx } from "@/lib/client/store";
 import { ChatPane } from "./ChatPane";
+import { CommandPalette } from "./CommandPalette";
 import { FeedView } from "./FeedView";
 import { FriendsView } from "./FriendsView";
 import { FxLayer } from "./Fx";
 import { Loader3D } from "./Loader";
-import { Celebration, FriendModal, GroupModal, Lightbox, ProfileModal, Toasts } from "./Modals";
+import { Celebration, FriendModal, GroupModal, Lightbox, Toasts } from "./Modals";
+import { ProfileCard } from "./ProfileCard";
 import { Rail } from "./Rail";
+import { SettingsModal } from "./Settings";
+import { ShortcutsModal } from "./Shortcuts";
 import { Sidebar, type ModalKind } from "./Sidebar";
 
 export function AppShell() {
@@ -20,13 +24,41 @@ export function AppShell() {
   );
 }
 
+const isTyping = (t: EventTarget | null) => t instanceof HTMLElement && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
+
 function Shell() {
-  const { ready, s, active, celebration, view } = useOnyx();
+  const { ready, s, active, celebration, view, setView, setActive } = useOnyx();
   const [modal, setModal] = useState<ModalKind | null>(null);
   const [image, setImage] = useState<string | null>(null);
-  const closeModal = () => setModal(null);
+  const [palette, setPalette] = useState(false);
+  const [keys, setKeys] = useState(false);
+  const closeModal = useCallback(() => setModal(null), []);
+  const closePalette = useCallback(() => setPalette(false), []);
+  const openKeys = useCallback(() => setKeys(true), []);
   // Someone just used your invite (or you used theirs): the celebration takes over from any open popup.
   useEffect(() => { if (celebration) setModal(null); }, [celebration]);
+
+  /* global keyboard shortcuts — read through a ref so the listener is attached once */
+  const live = useRef({ s, active, view });
+  live.current = { s, active, view };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); setPalette((v) => !v); return; }
+      if (e.altKey && ["1", "2", "3"].includes(e.key)) { e.preventDefault(); setView((["chats", "feed", "friends"] as const)[Number(e.key) - 1]); return; }
+      if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+        e.preventDefault();
+        const { s: st, active: act } = live.current;
+        const order = Object.values(st.convs).filter((c) => !c.archived).sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt);
+        if (!order.length) return;
+        const at = order.findIndex((c) => c.id === act);
+        setActive(order[Math.max(0, Math.min(order.length - 1, at + (e.key === "ArrowDown" ? 1 : -1)))]?.id ?? order[0].id);
+        return;
+      }
+      if (e.key === "?" && !isTyping(e.target)) { e.preventDefault(); setKeys(true); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [setView, setActive]);
 
   const inChat = view === "chats" && !!active; // on phones an open chat takes the full screen
 
@@ -59,7 +91,10 @@ function Shell() {
         <>
           <FriendModal open={modal === "code" || modal === "invite"} tab={modal === "invite" ? "invite" : "code"} setTab={(t) => setModal(t)} onClose={closeModal} />
           <GroupModal open={modal === "group"} onClose={closeModal} />
-          <ProfileModal open={modal === "profile"} onClose={closeModal} />
+          <SettingsModal open={modal === "settings"} onClose={closeModal} />
+          <ProfileCard />
+          <ShortcutsModal open={keys} onClose={() => setKeys(false)} />
+          <CommandPalette open={palette} onClose={closePalette} onModal={setModal} onShortcuts={openKeys} />
         </>
       )}
       <Lightbox src={image} onClose={() => setImage(null)} />

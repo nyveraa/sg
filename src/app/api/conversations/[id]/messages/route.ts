@@ -10,7 +10,7 @@ export const GET = route(async (req, ctx: RouteContext<"/api/conversations/[id]/
 
 export const POST = route(async (req, ctx: RouteContext<"/api/conversations/[id]/messages">) => {
   const me = await requireUser();
-  rateLimit(`send:${me.id}`, 60, 60_000);
+  rateLimit(`send:${me.id}`, 150, 60_000);
   const b = await json(req);
   const v = b.voice as { audio?: unknown; duration?: unknown; peaks?: unknown } | undefined;
   const message = sendMessage(me.id, (await ctx.params).id, {

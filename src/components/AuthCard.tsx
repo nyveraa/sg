@@ -52,7 +52,7 @@ export function AuthCard({ mode, onMode, onDone }: { mode: AuthMode; onMode: (m:
       <div aria-live="polite" className="min-h-9 pt-3 text-[13px] text-white/75 italic">{error}</div>
 
       <button disabled={busy} className="btn w-full justify-between">
-        <span>{mode === "signup" ? "Enter onyx" : "Continue"}</span>
+        <span>{mode === "signup" ? "Enter Whisper" : "Continue"}</span>
         {busy ? <Spinner /> : <ArrowRight size={16} />}
       </button>
       <button type="button" onClick={() => { onMode(mode === "signup" ? "login" : "signup"); setError(""); }}

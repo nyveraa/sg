@@ -153,8 +153,8 @@ r = await a.call("POST", "/api/conversations", { title: "crew", memberIds: [(awa
 ok(r.status === 200 && r.body.conversation.memberIds.length === 3, "group created", JSON.stringify(r));
 
 // profile + presence
-r = await a.call("PATCH", "/api/me", { displayName: "Ana K", hue: 40, bio: "hi" });
-ok(r.body.user.hue === 40, "profile update");
+r = await a.call("PATCH", "/api/me", { displayName: "Ana K", bio: "hi" });
+ok(r.body.me.displayName === "Ana K" && r.body.me.bio === "hi", "profile update");
 ac.abort();
 console.log(failed ? `\n${failed} FAILED` : "\nall passed");
 process.exit(failed ? 1 : 0);

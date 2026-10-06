@@ -2,9 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, animate, motion, useMotionValue, type AnimationPlaybackControlsWithThen } from "motion/react";
-import { Heart, ImagePlus, Send, X } from "lucide-react";
-import { useOnyx } from "@/lib/client/store";
-import { imageToDataUrl } from "@/lib/client/api";
+import { Eye, Heart, ImagePlus, Send, Trash2, X } from "lucide-react";
+import { useActions, useOnyx } from "@/lib/client/store";
+import { api, imageToDataUrl } from "@/lib/client/api";
+import { ago } from "@/lib/client/format";
+import type { StoryView } from "@/lib/types";
 import type { Post } from "@/lib/types";
 import { Avatar } from "./Avatar";
 import { Modal } from "./Modal";
@@ -36,13 +38,7 @@ export function useSeenStories() {
   return { seen, mark };
 }
 
-export const ago = (ts: number) => {
-  const m = Math.floor((Date.now() - ts) / 60000);
-  if (m < 1) return "just now";
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  return h < 24 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`;
-};
+export { ago };
 
 function StoryFace({ p }: { p: Post }) {
   if (p.image) {
@@ -64,7 +60,7 @@ function StoryFace({ p }: { p: Post }) {
 
 /** Fullscreen story player: segmented progress, tap zones, hold to pause, 3D-tilted card. */
 export function StoryViewer({ startUserId, onClose }: { startUserId: string | null; onClose: () => void }) {
-  const { s, likePost } = useOnyx();
+  const { s } = useOnyx();
   const { mark } = useSeenStories();
   const me = s.me!;
 
@@ -104,6 +100,7 @@ export function StoryViewer({ startUserId, onClose }: { startUserId: string | nu
   useEffect(() => {
     if (!open || !story) return;
     mark(story.id);
+    if (story.userId !== me.id) void api("POST", `/api/posts/${story.id}/view`).catch(() => {}); // lets the author see who watched
     progress.set(0);
     anim.current = animate(progress, 1, { duration: story.image ? 6 : 5, ease: "linear", onComplete: next });
     return () => anim.current?.stop();
@@ -112,6 +109,7 @@ export function StoryViewer({ startUserId, onClose }: { startUserId: string | nu
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLElement && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")) { if (e.key === "Escape") e.target.blur(); return; } // typing a reply
       if (e.key === "Escape") onClose();
       if (e.key === "ArrowRight") next();
       if (e.key === "ArrowLeft") prev();
@@ -122,7 +120,6 @@ export function StoryViewer({ startUserId, onClose }: { startUserId: string | nu
   }, [open, next, prev, onClose]);
 
   const author = group ? s.users[group[0]] : undefined;
-  const liked = story?.likes.includes(me.id);
 
   return (
     <AnimatePresence>
@@ -152,18 +149,77 @@ export function StoryViewer({ startUserId, onClose }: { startUserId: string | nu
               {/* tap zones */}
               <button aria-label="Previous" className="absolute inset-y-24 left-0 z-10 w-1/3" onClick={prev} />
               <button aria-label="Next" className="absolute inset-y-24 right-0 z-10 w-2/3" onClick={next} />
-              <div className="absolute inset-x-0 bottom-0 z-20 flex items-center justify-between bg-gradient-to-t from-black/80 to-transparent p-5 pt-14">
-                <span className="text-[13px] text-white/60 italic">{group[0] === me.id ? `${story.likes.length} like${story.likes.length === 1 ? "" : "s"}` : ""}</span>
-                <motion.button whileTap={{ scale: 0.8 }} onClick={() => likePost(story.id)} aria-pressed={liked} aria-label={liked ? "Unlike" : "Like"}
-                  className={`grid h-12 w-12 place-items-center rounded-full border transition ${liked ? "border-white bg-white text-black" : "border-white/30 bg-black/40 text-white backdrop-blur"}`}>
-                  <Heart size={19} fill={liked ? "currentColor" : "none"} />
-                </motion.button>
-              </div>
+              <StoryFooter story={story} mine={group[0] === me.id} pause={() => anim.current?.pause()} play={() => anim.current?.play()} onDeleted={next} />
             </motion.div>
           </AnimatePresence>
         </motion.div>
       )}
     </AnimatePresence>
+  );
+}
+
+/** Bottom bar: viewers + delete on your own stories; a reply box and like on everyone else's. */
+function StoryFooter({ story, mine, pause, play, onDeleted }: { story: Post; mine: boolean; pause: () => void; play: () => void; onDeleted: () => void }) {
+  const { s } = useOnyx();
+  const { likePost, deletePost, send, toast } = useActions();
+  const me = s.me!;
+  const liked = story.likes.includes(me.id);
+  const [views, setViews] = useState<StoryView[] | null>(null);
+  const [showViews, setShowViews] = useState(false);
+  const [text, setText] = useState("");
+  const dm = Object.values(s.convs).find((c) => c.kind === "dm" && c.memberIds.includes(story.userId));
+
+  useEffect(() => {
+    if (!mine) return;
+    let dead = false;
+    setViews(null); setShowViews(false);
+    api<{ views: StoryView[] }>("GET", `/api/posts/${story.id}/views`).then((r) => { if (!dead) setViews(r.views); }).catch(() => {});
+    return () => { dead = true; };
+  }, [mine, story.id]);
+
+  async function reply(t: string) {
+    const body = t.trim();
+    if (!dm || !body) return;
+    const quote = story.body ? `↩ “${story.body.slice(0, 50)}”\n` : "↩ your story\n";
+    if (await send(dm.id, { body: quote + body })) { setText(""); toast("Reply sent", "ok"); }
+  }
+
+  return (
+    <div className="absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-black/85 to-transparent p-5 pt-14" onPointerDown={(e) => e.stopPropagation()} onPointerUp={(e) => e.stopPropagation()}>
+      {mine ? (
+        <>
+          {showViews && (
+            <div className="mb-3 max-h-40 overflow-y-auto rounded-2xl border border-white/15 bg-black/80 p-2 backdrop-blur">
+              {views?.length ? views.map((v) => (
+                <div key={v.user.id} className="flex items-center gap-3 px-2 py-1.5"><Avatar user={v.user} size={28} ring={false} /><span className="flex-1 truncate text-[14px]">{v.user.displayName}</span><span className="text-[11px] text-white/50">{ago(v.at)}</span></div>
+              )) : <p className="px-3 py-3 text-[13px] text-white/60 italic">No views yet.</p>}
+            </div>
+          )}
+          <div className="flex items-center justify-between">
+            <button onClick={() => { setShowViews((v) => !v); showViews ? play() : pause(); }} aria-expanded={showViews} className="flex items-center gap-2 rounded-full border border-white/25 bg-black/40 px-4 py-2.5 text-[13px] backdrop-blur">
+              <Eye size={15} /> {views === null ? "…" : views.length} <span className="text-white/60">· {story.likes.length} like{story.likes.length === 1 ? "" : "s"}</span>
+            </button>
+            <button onClick={() => { deletePost(story.id); onDeleted(); }} aria-label="Delete story" className="grid h-11 w-11 place-items-center rounded-full border border-white/25 bg-black/40 backdrop-blur transition hover:bg-white hover:text-black"><Trash2 size={16} /></button>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="mb-3 flex justify-center gap-2">
+            {["❤️", "🔥", "😂", "😮", "👏"].map((e) => <button key={e} onClick={() => void reply(e)} className="grid h-10 w-10 place-items-center rounded-full bg-black/40 text-lg backdrop-blur transition hover:scale-125">{e}</button>)}
+          </div>
+          <div className="flex items-center gap-2.5">
+            <form className="flex-1" onSubmit={(e) => { e.preventDefault(); void reply(text); }}>
+              <input value={text} onChange={(e) => setText(e.target.value)} onFocus={pause} onBlur={play} maxLength={500} placeholder={dm ? "Reply…" : "Reply unavailable"} disabled={!dm} aria-label="Reply to story"
+                className="w-full rounded-full border border-white/30 bg-black/40 px-5 py-3 text-[14px] backdrop-blur outline-none placeholder:text-white/50 focus:border-white" />
+            </form>
+            <motion.button whileTap={{ scale: 0.8 }} onClick={() => likePost(story.id)} aria-pressed={liked} aria-label={liked ? "Unlike" : "Like"}
+              className={`grid h-12 w-12 shrink-0 place-items-center rounded-full border transition ${liked ? "border-white bg-white text-black" : "border-white/30 bg-black/40 text-white backdrop-blur"}`}>
+              <Heart size={19} fill={liked ? "currentColor" : "none"} />
+            </motion.button>
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 

@@ -29,3 +29,17 @@ export async function imageToDataUrl(file: File, maxSide = 1100): Promise<string
   }
   throw new Error("That image is too large");
 }
+
+/** Centre-crop to a square and shrink to a small JPEG — profile photos stay ~10–20 KB. */
+export async function avatarFromFile(file: File, side = 256): Promise<string> {
+  const bmp = await createImageBitmap(file);
+  const s = Math.min(bmp.width, bmp.height);
+  const c = document.createElement("canvas");
+  c.width = c.height = side;
+  c.getContext("2d")!.drawImage(bmp, (bmp.width - s) / 2, (bmp.height - s) / 2, s, s, 0, 0, side, side);
+  for (const q of [0.85, 0.7, 0.55]) {
+    const url = c.toDataURL("image/jpeg", q);
+    if (url.length < 120_000) return url;
+  }
+  throw new Error("That photo is too large");
+}

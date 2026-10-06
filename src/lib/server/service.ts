@@ -2,36 +2,69 @@ import crypto from "node:crypto";
 import { all, one, run, tx } from "./db";
 import { emitTo, isOnline } from "./bus";
 import { ApiError } from "./api";
-import { hashPassword } from "./password";
+import { hashPassword, verifyPassword } from "./password";
+import { DEFAULT_PREFS, sanitizePrefs } from "../prefs";
 import {
   EFFECTS, type BallData, type Bootstrap, type C4Data, type Conversation, type Effect, type FlipData,
   type FriendInfo, type InviteRow, type Message, type MessageKind, type PollData, type Post, type PostComment,
+  type Me, type Prefs, type SpinData, type StoryView,
   type PromptData, type RollData, type RpsData, type RpsPick, type TttData, type User, type VoiceData,
 } from "../types";
 
 /* ───────────────────────────── users ───────────────────────────── */
 
-type UserRow = { id: string; username: string; display_name: string; bio: string; hue: number };
+type UserRow = {
+  id: string; username: string; display_name: string; bio: string; hue: number;
+  status: string; pronouns: string; avatar: string | null; last_seen: number | null; prefs: string;
+};
+const USER_COLS = "id, username, display_name, bio, hue, status, pronouns, avatar, last_seen, prefs";
 
-const toUserDto = (r: UserRow): User => ({
-  id: r.id,
-  username: r.username,
-  displayName: r.display_name,
-  bio: r.bio,
-  hue: r.hue,
-  online: isOnline(r.id),
-});
+function prefsOf(r: Pick<UserRow, "prefs">): Prefs {
+  try { return sanitizePrefs(JSON.parse(r.prefs || "{}")); } catch { return DEFAULT_PREFS; }
+}
+const prefsById = (id: string): Prefs => {
+  const r = one<UserRow>(`SELECT ${USER_COLS} FROM users WHERE id = ?`, id);
+  return r ? prefsOf(r) : DEFAULT_PREFS;
+};
+const receiptsOn = (id: string) => prefsById(id).readReceipts;
+
+/**
+ * What other people may see. Privacy is applied here, once, so no caller can leak it:
+ * hiding "online" hides both presence and last-seen while the person is actually online.
+ */
+function toUserDto(r: UserRow, forSelf = false): User {
+  const p = prefsOf(r);
+  const online = isOnline(r.id);
+  return {
+    id: r.id, username: r.username, displayName: r.display_name, bio: r.bio, hue: r.hue,
+    status: r.status, pronouns: r.pronouns, avatar: r.avatar,
+    online: forSelf ? online : p.showOnline && online,
+    lastSeen: forSelf ? r.last_seen : p.showLastSeen && !(online && !p.showOnline) ? r.last_seen : null,
+  };
+}
 
 export function toUser(id: string): User | null {
-  const r = one<UserRow>("SELECT id, username, display_name, bio, hue FROM users WHERE id = ?", id);
+  const r = one<UserRow>(`SELECT ${USER_COLS} FROM users WHERE id = ?`, id);
   return r ? toUserDto(r) : null;
+}
+export function toMe(id: string): Me {
+  const r = one<UserRow>(`SELECT ${USER_COLS} FROM users WHERE id = ?`, id)!;
+  return { ...toUserDto(r, true), prefs: prefsOf(r) };
 }
 
 function usersByIds(ids: string[]): User[] {
   if (!ids.length) return [];
-  const rows = all<UserRow>(
-    `SELECT id, username, display_name, bio, hue FROM users WHERE id IN (${ids.map(() => "?").join(",")})`, ...ids);
-  return rows.map(toUserDto);
+  const rows = all<UserRow>(`SELECT ${USER_COLS} FROM users WHERE id IN (${ids.map(() => "?").join(",")})`, ...ids);
+  return rows.map((r) => toUserDto(r));
+}
+
+const lastTouch = new Map<string, number>();
+/** Records activity for "last active". Throttled so ordinary API traffic costs ~nothing. */
+export function touchSeen(userId: string, force = false) {
+  const now = Date.now();
+  if (!force && now - (lastTouch.get(userId) ?? 0) < 30_000) return;
+  lastTouch.set(userId, now);
+  run("UPDATE users SET last_seen = ? WHERE id = ?", now, userId);
 }
 
 export function findLogin(username: string) {
@@ -47,8 +80,8 @@ export function createUser(username: string, displayName: string, password: stri
   const id = crypto.randomUUID();
   const { salt, hash } = hashPassword(password);
   run(
-    "INSERT INTO users (id, username, display_name, hue, pass_salt, pass_hash, created_at) VALUES (?,?,?,?,?,?,?)",
-    id, uname, displayName || uname, crypto.randomInt(0, 360), salt, hash, Date.now());
+    "INSERT INTO users (id, username, display_name, hue, pass_salt, pass_hash, created_at, last_seen) VALUES (?,?,?,?,?,?,?,?)",
+    id, uname, displayName || uname, crypto.randomInt(0, 360), salt, hash, Date.now(), Date.now());
   return toUser(id)!;
 }
 
@@ -60,19 +93,41 @@ function audience(userId: string): string[] {
     userId, userId).map((r) => r.id);
 }
 
-export function updateProfile(userId: string, patch: { displayName?: string; bio?: string; hue?: number }) {
-  const cur = toUser(userId)!;
-  const displayName = patch.displayName || cur.displayName;
-  const bio = patch.bio ?? cur.bio;
-  const hue = patch.hue !== undefined && Number.isFinite(patch.hue) ? Math.round(((patch.hue % 360) + 360) % 360) : cur.hue;
-  run("UPDATE users SET display_name = ?, bio = ?, hue = ? WHERE id = ?", displayName, bio, hue, userId);
-  const user = toUser(userId)!;
-  emitTo([userId, ...audience(userId)], { type: "user", user });
-  return user;
+export type ProfilePatch = {
+  displayName?: string; bio?: string; status?: string; pronouns?: string; avatar?: string | null; prefs?: unknown;
+};
+
+export function updateProfile(userId: string, patch: ProfilePatch): Me {
+  const cur = one<UserRow>(`SELECT ${USER_COLS} FROM users WHERE id = ?`, userId)!;
+  const curPrefs = prefsOf(cur);
+  let avatar = cur.avatar;
+  if (patch.avatar === null) avatar = null;
+  else if (typeof patch.avatar === "string") {
+    if (patch.avatar.length > 150_000 || !IMAGE_RE.test(patch.avatar)) throw new ApiError(400, "Unsupported or oversized photo");
+    avatar = patch.avatar;
+  }
+  const prefs = patch.prefs === undefined ? curPrefs : sanitizePrefs(patch.prefs, curPrefs);
+  run("UPDATE users SET display_name = ?, bio = ?, status = ?, pronouns = ?, avatar = ?, prefs = ? WHERE id = ?",
+    patch.displayName || cur.display_name, patch.bio ?? cur.bio, (patch.status ?? cur.status).slice(0, 60),
+    (patch.pronouns ?? cur.pronouns).slice(0, 24), avatar, JSON.stringify(prefs), userId);
+
+  const others = audience(userId);
+  emitTo(others, { type: "user", user: toUser(userId)! });
+  emitTo([userId], { type: "me", me: toMe(userId) });
+  // Receipt settings change what every viewer sees in shared chats, so re-send those chats per viewer.
+  if (prefs.readReceipts !== curPrefs.readReceipts) {
+    for (const { conv_id } of all<{ conv_id: string }>("SELECT conv_id FROM members WHERE user_id = ?", userId)) pushConversation(conv_id);
+  }
+  if (prefs.showOnline !== curPrefs.showOnline && isOnline(userId)) broadcastPresence(userId, true);
+  return toMe(userId);
 }
 
+/** Tells friends someone came online / went offline (unless they chose to hide it). */
 export function broadcastPresence(userId: string, online: boolean) {
-  emitTo(audience(userId), { type: "presence", userId, online });
+  const user = toUser(userId);
+  if (!user) return;
+  emitTo(audience(userId), { type: "presence", userId, online: user.online, lastSeen: user.lastSeen });
+  void online;
 }
 
 /* ───────────────────────────── messages ───────────────────────────── */
@@ -150,6 +205,7 @@ function insertMessage(
     convId, senderId, kind, body, data ? JSON.stringify(data) : null, secret ? JSON.stringify(secret) : null, replyTo, now);
   const id = Number(res.lastInsertRowid);
   run("UPDATE conversations SET updated_at = ? WHERE id = ?", now, convId);
+  run("UPDATE members SET archived = 0 WHERE conv_id = ? AND muted = 0 AND user_id != ?", convId, senderId); // a new message pulls a chat out of the archive
   run("UPDATE members SET last_read = ? WHERE conv_id = ? AND user_id = ? AND last_read < ?", id, convId, senderId, id);
   return loadMessage(id);
 }
@@ -176,10 +232,18 @@ const DARES = [
   "Tell a story using only emojis.", "Compliment everyone here in the most dramatic way possible.",
 ];
 
+const WYR: [string, string][] = [
+  ["Never use a phone again", "Never use the internet again"], ["Live in the past", "Live in the future"],
+  ["Always be 10 minutes late", "Always be 20 minutes early"], ["Speak every language", "Play every instrument"],
+  ["Have unlimited sushi", "Have unlimited pizza"], ["Be invisible", "Be able to fly"],
+  ["Lose your memories", "Never make new ones"], ["Know how you die", "Know when you die"],
+  ["Only whisper", "Only shout"], ["Explore the deep sea", "Explore outer space"],
+];
+
 type Built = { kind: MessageKind; body: string; data?: unknown; secret?: unknown };
 
 /** Slash commands. Returns null for plain text. Server-side so results are fair and identical for everyone. */
-export function parseCommand(userId: string, text: string): Built | null {
+export function parseCommand(userId: string, text: string, convId?: string): Built | null {
   const m = /^\/(\w+)(?:\s+([\s\S]*))?$/.exec(text);
   if (!m) return null;
   const arg = (m[2] ?? "").trim();
@@ -219,6 +283,17 @@ export function parseCommand(userId: string, text: string): Built | null {
       const pool = type === "truth" ? TRUTHS : DARES;
       return { kind: "prompt", body: type, data: { type, text: pool[crypto.randomInt(0, pool.length)] } satisfies PromptData };
     }
+    case "spin": {
+      const members = convId ? memberIds(convId) : [userId];
+      const data: SpinData = { question: arg || "Who goes first?", memberIds: members, winnerId: members[crypto.randomInt(0, members.length)] };
+      return { kind: "spin", body: data.question, data };
+    }
+    case "wyr": {
+      const [a, b] = arg.includes("|") ? arg.split("|").map((x) => x.trim()) : WYR[crypto.randomInt(0, WYR.length)];
+      if (!a || !b) throw new ApiError(400, "Format: /wyr Option A | Option B (or just /wyr for a random one)");
+      const poll: PollData = { question: "Would you rather…", options: [{ text: a.slice(0, 80), votes: [] }, { text: b.slice(0, 80), votes: [] }] };
+      return { kind: "poll", body: poll.question, data: poll };
+    }
     case "shrug":
       return { kind: "text", body: `${arg} ¯\\_(ツ)_/¯`.trim() };
     default:
@@ -255,7 +330,7 @@ export function sendMessage(
     built = { kind: "voice", body: audio, data: { duration: Math.round(duration * 10) / 10, peaks: peaks.map((p) => Math.round(p * 100) / 100) } satisfies VoiceData };
   } else {
     if (!input.body) throw new ApiError(400, "Message is empty");
-    built = parseCommand(userId, input.body) ?? { kind: "text", body: input.body };
+    built = parseCommand(userId, input.body, convId) ?? { kind: "text", body: input.body };
   }
   const message = insertMessage(convId, userId, built.kind, built.body, built.data ?? null, replyTo, built.secret ?? null);
   emitTo(memberIds(convId), { type: "message", message });
@@ -391,43 +466,76 @@ export function actOnMessage(userId: string, id: number, action: { option?: numb
   });
 }
 
+/** Read receipts are mutual: if either person turns them off, neither sees the other's reads. */
 export function markRead(userId: string, convId: string) {
   assertMember(convId, userId);
   const top = one<{ m: number | null }>("SELECT MAX(id) AS m FROM messages WHERE conv_id = ?", convId)?.m ?? 0;
   const res = run("UPDATE members SET last_read = ? WHERE conv_id = ? AND user_id = ? AND last_read < ?", top, convId, userId, top);
-  if (Number(res.changes) > 0) emitTo(memberIds(convId), { type: "read", convId, userId, lastReadId: top });
+  if (Number(res.changes) === 0) return;
+  const event = { type: "read" as const, convId, userId, lastReadId: top };
+  emitTo([userId], event); // your own other tabs always learn that you read it
+  if (!receiptsOn(userId)) return;
+  emitTo(memberIds(convId).filter((m) => m !== userId && receiptsOn(m)), event);
 }
 
 export function typing(userId: string, convId: string) {
   assertMember(convId, userId);
+  if (!prefsById(userId).typingIndicator) return;
   emitTo(memberIds(convId).filter((m) => m !== userId), { type: "typing", convId, userId });
 }
 
 /* ───────────────────────────── conversations ───────────────────────────── */
 
 type ConvRow = { id: string; kind: "dm" | "group"; title: string | null; updated_at: number };
+type MemberRow = { user_id: string; last_read: number; pinned: number; muted: number; archived: number };
+
+const ymd = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+/** Consecutive days (ending today or yesterday) on which BOTH people wrote in a DM. */
+function streakOf(convId: string): number {
+  const days = all<{ d: string }>(
+    `SELECT date(created_at / 1000, 'unixepoch', 'localtime') AS d FROM messages
+     WHERE conv_id = ? AND deleted = 0 AND kind != 'system' GROUP BY d HAVING COUNT(DISTINCT sender_id) >= 2 ORDER BY d DESC LIMIT 400`,
+    convId).map((r) => r.d);
+  if (!days.length) return 0;
+  const cur = new Date();
+  if (days[0] !== ymd(cur)) { cur.setDate(cur.getDate() - 1); if (days[0] !== ymd(cur)) return 0; }
+  let n = 0;
+  for (const d of days) { if (d !== ymd(cur)) break; n++; cur.setDate(cur.getDate() - 1); }
+  return n;
+}
 
 export function conversationFor(convId: string, viewerId: string): Conversation {
   const c = one<ConvRow>("SELECT id, kind, title, updated_at FROM conversations WHERE id = ?", convId)!;
-  const members = all<{ user_id: string; last_read: number }>("SELECT user_id, last_read FROM members WHERE conv_id = ?", convId);
-  const mine = members.find((m) => m.user_id === viewerId)?.last_read ?? 0;
+  const members = all<MemberRow>("SELECT user_id, last_read, pinned, muted, archived FROM members WHERE conv_id = ?", convId);
+  const me = members.find((m) => m.user_id === viewerId);
+  const mine = me?.last_read ?? 0;
   const lastRow = one<MsgRow>("SELECT * FROM messages WHERE conv_id = ? ORDER BY id DESC LIMIT 1", convId);
   const unread = one<{ n: number }>(
     "SELECT COUNT(*) AS n FROM messages WHERE conv_id = ? AND id > ? AND sender_id != ? AND deleted = 0 AND kind != 'system'",
     convId, mine, viewerId)!.n;
+  const viewerSharesReceipts = receiptsOn(viewerId);
   return {
     id: c.id, kind: c.kind, title: c.title,
     memberIds: members.map((m) => m.user_id),
-    reads: Object.fromEntries(members.map((m) => [m.user_id, m.last_read])),
+    reads: Object.fromEntries(members.map((m) => [m.user_id, m.user_id === viewerId || (viewerSharesReceipts && receiptsOn(m.user_id)) ? m.last_read : 0])),
     unread, last: lastRow ? hydrate([lastRow])[0] : null, updatedAt: c.updated_at,
+    pinned: !!me?.pinned, muted: !!me?.muted, archived: !!me?.archived,
+    streak: c.kind === "dm" ? streakOf(convId) : 0,
   };
 }
 
+export function nicknamesOf(userId: string): Record<string, string> {
+  return Object.fromEntries(all<{ target_id: string; nickname: string }>(
+    "SELECT target_id, nickname FROM nicknames WHERE owner_id = ?", userId).map((r) => [r.target_id, r.nickname]));
+}
+
 export function bootstrap(userId: string): Bootstrap {
+  touchSeen(userId);
   const convIds = all<{ conv_id: string }>("SELECT conv_id FROM members WHERE user_id = ?", userId).map((r) => r.conv_id);
   const conversations = convIds.map((id) => conversationFor(id, userId)).sort((a, b) => b.updatedAt - a.updatedAt);
   const ids = new Set<string>([userId, ...conversations.flatMap((c) => c.memberIds)]);
-  return { me: toUser(userId)!, users: usersByIds([...ids]), conversations };
+  return { me: toMe(userId), users: usersByIds([...ids]), conversations, nicknames: nicknamesOf(userId) };
 }
 
 function getOrCreateDm(a: string, b: string): string {
@@ -649,4 +757,149 @@ export function addComment(userId: string, postId: number, body: string): PostCo
   const res = run("INSERT INTO post_comments (post_id, user_id, body, created_at) VALUES (?,?,?,?)", postId, userId, body, now);
   broadcastPost(postId, r.user_id);
   return { id: Number(res.lastInsertRowid), postId, userId, body, createdAt: now };
+}
+
+/* ───────────────────────────── per-chat preferences, groups, nicknames ───────────────────────────── */
+
+const pushToSelf = (userId: string, convId: string) =>
+  emitTo([userId], { type: "conversation", conversation: conversationFor(convId, userId), users: usersByIds(memberIds(convId)) });
+
+/** Pin / mute / archive are personal: only the viewer's own row changes. */
+export function setConvPrefs(userId: string, convId: string, patch: { pinned?: boolean; muted?: boolean; archived?: boolean }) {
+  assertMember(convId, userId);
+  const cur = one<{ pinned: number; muted: number; archived: number }>(
+    "SELECT pinned, muted, archived FROM members WHERE conv_id = ? AND user_id = ?", convId, userId)!;
+  const pick = (v: unknown, old: number) => (typeof v === "boolean" ? (v ? 1 : 0) : old);
+  run("UPDATE members SET pinned = ?, muted = ?, archived = ? WHERE conv_id = ? AND user_id = ?",
+    pick(patch.pinned, cur.pinned), pick(patch.muted, cur.muted), pick(patch.archived, cur.archived), convId, userId);
+  pushToSelf(userId, convId);
+  return conversationFor(convId, userId);
+}
+
+function assertGroup(convId: string) {
+  if (one<{ kind: string }>("SELECT kind FROM conversations WHERE id = ?", convId)?.kind !== "group") throw new ApiError(400, "That only works in groups");
+}
+
+export function renameGroup(userId: string, convId: string, title: string) {
+  assertMember(convId, userId); assertGroup(convId);
+  if (!title) throw new ApiError(400, "Give the group a name");
+  run("UPDATE conversations SET title = ? WHERE id = ?", title, convId);
+  const message = insertMessage(convId, userId, "system", `renamed the group to “${title}”`);
+  pushConversation(convId);
+  emitTo(memberIds(convId), { type: "message", message });
+}
+
+export function addGroupMembers(userId: string, convId: string, ids: string[]) {
+  assertMember(convId, userId); assertGroup(convId);
+  const existing = new Set(memberIds(convId));
+  const fresh = [...new Set(ids)].filter((i) => !existing.has(i));
+  if (!fresh.length) throw new ApiError(400, "Pick friends who aren't already in the group");
+  if (!fresh.every((i) => areFriends(userId, i))) throw new ApiError(403, "You can only add your friends");
+  if (existing.size + fresh.length > 21) throw new ApiError(400, "Groups are limited to 21 people");
+  tx(() => { for (const f of fresh) run("INSERT INTO members (conv_id, user_id) VALUES (?,?)", convId, f); });
+  const message = insertMessage(convId, userId, "system", `added ${usersByIds(fresh).map((u) => u.displayName).join(", ")}`);
+  pushConversation(convId); // new members get the chat first…
+  emitTo(memberIds(convId), { type: "message", message }); // …then the announcement
+}
+
+export function leaveGroup(userId: string, convId: string) {
+  assertMember(convId, userId); assertGroup(convId);
+  const out: { message: Message | null } = { message: null };
+  tx(() => {
+    run("DELETE FROM members WHERE conv_id = ? AND user_id = ?", convId, userId);
+    if (memberIds(convId).length === 0) run("DELETE FROM conversations WHERE id = ?", convId);
+    else out.message = insertMessage(convId, userId, "system", "left the group");
+  });
+  emitTo([userId], { type: "conversation_removed", convId });
+  if (out.message) { pushConversation(convId); emitTo(memberIds(convId), { type: "message", message: out.message }); }
+}
+
+/** A private alias only you see for a friend or group-mate. */
+export function setNickname(userId: string, targetId: string, nickname: string) {
+  const nick = nickname.trim().slice(0, 40);
+  if (targetId === userId || !toUser(targetId)) throw new ApiError(404, "Person not found");
+  const related = areFriends(userId, targetId) || !!one(
+    "SELECT 1 AS x FROM members a JOIN members b ON a.conv_id = b.conv_id WHERE a.user_id = ? AND b.user_id = ?", userId, targetId);
+  if (!related) throw new ApiError(404, "Person not found");
+  if (!nick) run("DELETE FROM nicknames WHERE owner_id = ? AND target_id = ?", userId, targetId);
+  else run("INSERT INTO nicknames (owner_id, target_id, nickname) VALUES (?,?,?) ON CONFLICT(owner_id, target_id) DO UPDATE SET nickname = excluded.nickname", userId, targetId, nick);
+  return nicknamesOf(userId);
+}
+
+/* ───────────────────────────── story viewers ───────────────────────────── */
+
+export function recordStoryView(userId: string, postId: number) {
+  const r = visiblePost(userId, postId);
+  if (r.kind !== "story" || r.user_id === userId) return;
+  run("INSERT OR IGNORE INTO story_views (post_id, user_id, at) VALUES (?,?,?)", postId, userId, Date.now());
+}
+
+export function storyViews(userId: string, postId: number): StoryView[] {
+  const r = one<PostRow>("SELECT * FROM posts WHERE id = ?", postId);
+  if (!r || r.user_id !== userId) throw new ApiError(403, "Only the author can see who viewed a story");
+  const rows = all<{ user_id: string; at: number }>("SELECT user_id, at FROM story_views WHERE post_id = ? ORDER BY at DESC", postId);
+  const users = new Map(usersByIds(rows.map((v) => v.user_id)).map((u) => [u.id, u]));
+  return rows.flatMap((v) => (users.get(v.user_id) ? [{ user: users.get(v.user_id)!, at: v.at }] : []));
+}
+
+/* ───────────────────────────── account security & data ───────────────────────────── */
+
+function checkPassword(userId: string, password: string) {
+  const row = one<{ pass_salt: string; pass_hash: string }>("SELECT pass_salt, pass_hash FROM users WHERE id = ?", userId);
+  if (!row || !verifyPassword(password, row.pass_salt, row.pass_hash)) throw new ApiError(403, "That password is wrong");
+}
+
+export function changePassword(userId: string, current: string, next: string) {
+  checkPassword(userId, current);
+  if (next.length < 8) throw new ApiError(400, "Password must be at least 8 characters");
+  const { salt, hash } = hashPassword(next);
+  run("UPDATE users SET pass_salt = ?, pass_hash = ? WHERE id = ?", salt, hash, userId);
+  run("DELETE FROM sessions WHERE user_id = ?", userId); // every device must sign in again
+}
+
+export function logoutEverywhere(userId: string) {
+  run("DELETE FROM sessions WHERE user_id = ?", userId);
+}
+
+/** Permanently removes the account, its messages, posts and DMs. Group-mates just see you leave. */
+export function deleteAccount(userId: string, password: string) {
+  checkPassword(userId, password);
+  const friends = friendIds(userId);
+  const dms = all<{ id: string }>("SELECT c.id FROM conversations c JOIN members m ON m.conv_id = c.id WHERE m.user_id = ? AND c.kind = 'dm'", userId).map((r) => r.id);
+  const groups = all<{ id: string }>("SELECT c.id FROM conversations c JOIN members m ON m.conv_id = c.id WHERE m.user_id = ? AND c.kind = 'group'", userId).map((r) => r.id);
+  tx(() => {
+    for (const id of dms) run("DELETE FROM conversations WHERE id = ?", id);
+    run("DELETE FROM members WHERE user_id = ?", userId);
+    run("DELETE FROM messages WHERE sender_id = ?", userId);
+    run("DELETE FROM conversations WHERE kind = 'group' AND id NOT IN (SELECT DISTINCT conv_id FROM members)");
+    run("UPDATE invites SET used_by = NULL WHERE used_by = ?", userId);
+    run("DELETE FROM users WHERE id = ?", userId);
+  });
+  for (const f of friends) {
+    emitTo([f], { type: "friend_removed", userId, convId: `dm_${[userId, f].sort().join("_")}` });
+  }
+  for (const g of groups) if (one("SELECT 1 AS x FROM conversations WHERE id = ?", g)) pushConversation(g);
+}
+
+/** A readable JSON export of everything tied to the account (media are replaced by placeholders). */
+export function exportData(userId: string) {
+  const me = toMe(userId);
+  const convs = all<{ id: string; kind: string; title: string | null }>(
+    "SELECT c.id, c.kind, c.title FROM conversations c JOIN members m ON m.conv_id = c.id WHERE m.user_id = ?", userId);
+  const name = (id: string) => toUser(id)?.username ?? "deleted";
+  return {
+    exportedAt: new Date().toISOString(),
+    profile: { username: me.username, displayName: me.displayName, bio: me.bio, status: me.status, pronouns: me.pronouns, prefs: me.prefs, hasPhoto: !!me.avatar },
+    friends: listFriends(userId).map((f) => ({ username: f.user.username, displayName: f.user.displayName, since: new Date(f.since).toISOString() })),
+    conversations: convs.map((c) => ({
+      kind: c.kind, title: c.title, members: memberIds(c.id).map(name),
+      messages: all<MsgRow>("SELECT * FROM messages WHERE conv_id = ? AND deleted = 0 ORDER BY id LIMIT 5000", c.id).map((m) => ({
+        at: new Date(m.created_at).toISOString(), from: name(m.sender_id), kind: m.kind,
+        text: ["text", "system", "prompt"].includes(m.kind) ? m.body : `[${m.kind}]`,
+      })),
+    })),
+    posts: all<PostRow>("SELECT * FROM posts WHERE user_id = ? ORDER BY id", userId).map((p) => ({
+      kind: p.kind, at: new Date(p.created_at).toISOString(), text: p.body, hasImage: !!p.image,
+    })),
+  };
 }

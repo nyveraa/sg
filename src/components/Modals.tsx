@@ -2,10 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { ArrowRight, Check, Copy, KeyRound, Link2, LogOut, RefreshCw, Share2, Ticket, UserPlus, Users } from "lucide-react";
+import { ArrowRight, Check, Copy, KeyRound, Link2, RefreshCw, Share2, Ticket, UserPlus, Users } from "lucide-react";
 import { useOnyx } from "@/lib/client/store";
 import { Avatar } from "./Avatar";
-import { Mark } from "./Logo";
+import { Wordmark } from "./Logo";
 import { Modal } from "./Modal";
 import { Spinner } from "./Loader";
 import { HeroScene } from "./Scene";
@@ -123,7 +123,7 @@ function InviteTicket() {
         <Tilt className="card overflow-hidden p-6" max={10}>
           <div className="sheen pointer-events-none absolute inset-0" />
           <div className="flex items-center justify-between">
-            <Mark size={26} className="text-white" />
+            <Wordmark size={24} />
             <span className="label">Single use</span>
           </div>
           <div className="my-8 flex justify-center font-mono text-[32px] font-medium tracking-[0.12em] sm:text-4xl" aria-label={`Invite code ${pretty}`}>
@@ -144,7 +144,7 @@ function InviteTicket() {
         <button onClick={() => { void copy(link, "Link"); done("link"); }} className="btn">{copied === "link" ? <Check size={14} /> : <Link2 size={14} />} Link</button>
       </div>
       {typeof navigator !== "undefined" && "share" in navigator && (
-        <button onClick={() => void navigator.share({ title: "Join me on onyx.", text: `Use my onyx invite code ${pretty}`, url: link }).catch(() => {})} className="btn btn-ghost mt-2.5 w-full"><Share2 size={14} /> Share</button>
+        <button onClick={() => void navigator.share({ title: "Join me on Whisper", text: `Use my Whisper invite code ${pretty}`, url: link }).catch(() => {})} className="btn btn-ghost mt-2.5 w-full"><Share2 size={14} /> Share</button>
       )}
       <div className="mt-6 flex items-center justify-between text-[12.5px] text-mute italic">
         <span>Expires in ~{days} days</span>
@@ -190,42 +190,6 @@ export function GroupModal({ open, onClose }: { open: boolean; onClose: () => vo
   );
 }
 
-/* ───────────── profile ───────────── */
-
-export function ProfileModal({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const { s, saveProfile, logout, toast } = useOnyx();
-  const me = s.me!;
-  const [name, setName] = useState(me.displayName);
-  const [bio, setBio] = useState(me.bio);
-  const [busy, setBusy] = useState(false);
-  useEffect(() => { if (open) { setName(me.displayName); setBio(me.bio); } }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  async function save() {
-    setBusy(true);
-    try { await saveProfile({ displayName: name.trim() || me.displayName, bio: bio.trim() }); toast("Profile saved", "ok"); onClose(); }
-    catch (e) { toast(e instanceof Error ? e.message : "Couldn't save", "error"); }
-    setBusy(false);
-  }
-
-  return (
-    <Modal open={open} onClose={onClose} title="Profile" eyebrow={`@${me.username}`}>
-      <Tilt className="card mb-8 flex items-center gap-5 p-5" max={7}>
-        <Avatar user={{ displayName: name || me.displayName }} size={72} online />
-        <div className="min-w-0"><div className="display truncate text-[30px]">{name || me.displayName}</div>
-          <div className="mt-1.5 truncate text-[14px] text-mute italic">{bio || "No bio yet"}</div></div>
-      </Tilt>
-      <div className="space-y-6">
-        <label className="block"><span className="label">Display name</span><input value={name} onChange={(e) => setName(e.target.value)} maxLength={40} className="field" /></label>
-        <label className="block"><span className="label">Bio</span><input value={bio} onChange={(e) => setBio(e.target.value)} maxLength={140} placeholder="Shown under your name" className="field" /></label>
-      </div>
-      <div className="mt-9 grid grid-cols-[auto_1fr] gap-3">
-        <button onClick={() => void logout()} className="btn btn-ghost"><LogOut size={14} /> Log out</button>
-        <button onClick={save} disabled={busy} className="btn justify-between"><span>Save</span>{busy ? <Spinner /> : <Check size={16} />}</button>
-      </div>
-    </Modal>
-  );
-}
-
 /* ───────────── celebration / lightbox / toasts ───────────── */
 
 export function Celebration() {
@@ -241,7 +205,7 @@ export function Celebration() {
     <AnimatePresence>
       {celebration && (
         <motion.div role="dialog" aria-modal="true" aria-label="Friend connected" className="fixed inset-0 z-[120] bg-black" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={closeCelebration}>
-          <div className="absolute inset-0 opacity-70"><HeroScene compact /></div>
+          {s.me?.prefs.effects === "full" && <div className="absolute inset-0 opacity-70"><HeroScene compact /></div>}
           <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_center,rgb(0_0_0/.72)_20%,#000_90%)]" />
           <div className="absolute inset-0 grid place-items-center p-4">
             <div className="relative text-center [perspective:900px]" onClick={(e) => e.stopPropagation()}>

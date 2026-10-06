@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start -p 3100",
     "seed": "node tests/seed.mjs",
-    "test:api": "node tests/smoke.mjs && node tests/smoke2.mjs",
+    "test:api": "node tests/smoke.mjs && node tests/smoke2.mjs && node tests/smoke3.mjs",
     "test:e2e": "node tests/e2e.mjs"
   },
   "dependencies": {

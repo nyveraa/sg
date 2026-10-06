@@ -1,4 +1,4 @@
-# onyx.
+# Whisper
 
 Private, invite-only messaging with a cinematic black-and-white interface.
 
@@ -25,7 +25,7 @@ Type: EB Garamond (display) · Instrument Sans (UI) · Martian Mono (codes).
 
 ## Tests
 ```bash
-npm run test:api     # 86 API checks (auth, invites, access control, games, posts, friends…)
+npm run test:api     # 149 API checks (auth, invites, access control, privacy and read receipts, games, posts, friends…)
 npm run seed && npm run test:e2e   # 35 browser checks in headless Chrome (needs Chrome or Edge installed)
 ```
 Dev conveniences: `ONYX_NO_RATELIMIT=1 npm run dev` disables rate limits (ignored in production);

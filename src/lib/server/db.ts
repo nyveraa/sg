@@ -91,13 +91,36 @@ CREATE TABLE IF NOT EXISTS post_comments (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS comments_post ON post_comments(post_id, id);
+CREATE TABLE IF NOT EXISTS nicknames (
+  owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  target_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  nickname TEXT NOT NULL,
+  PRIMARY KEY (owner_id, target_id)
+);
+CREATE TABLE IF NOT EXISTS story_views (
+  post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  at INTEGER NOT NULL,
+  PRIMARY KEY (post_id, user_id)
+);
 `;
 
 /** Additive migrations for databases created by earlier versions. */
 function migrate(d: DatabaseSync) {
-  const cols = d.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
+  const addColumn = (table: string, column: string, ddl: string) => {
+    const cols = d.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+    if (!cols.some((c) => c.name === column)) d.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+  };
   // `secret` holds server-only state (e.g. hidden Rock-Paper-Scissors picks) that must never reach clients.
-  if (!cols.some((c) => c.name === "secret")) d.exec("ALTER TABLE messages ADD COLUMN secret TEXT");
+  addColumn("messages", "secret", "TEXT");
+  addColumn("users", "last_seen", "INTEGER");
+  addColumn("users", "status", "TEXT NOT NULL DEFAULT ''");
+  addColumn("users", "pronouns", "TEXT NOT NULL DEFAULT ''");
+  addColumn("users", "avatar", "TEXT");
+  addColumn("users", "prefs", "TEXT NOT NULL DEFAULT '{}'");
+  addColumn("members", "pinned", "INTEGER NOT NULL DEFAULT 0");
+  addColumn("members", "muted", "INTEGER NOT NULL DEFAULT 0");
+  addColumn("members", "archived", "INTEGER NOT NULL DEFAULT 0");
 }
 
 export function db(): DatabaseSync {

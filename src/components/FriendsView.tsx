@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { Check, KeyRound, Link2, MessageCircle, Search, Ticket, UserMinus, X } from "lucide-react";
 import { api } from "@/lib/client/api";
+import { presenceLabel } from "@/lib/client/format";
 import { useOnyx } from "@/lib/client/store";
 import type { FriendInfo, InviteRow } from "@/lib/types";
 import { Avatar } from "./Avatar";
@@ -49,7 +50,7 @@ export function FriendsView({ onModal }: { onModal: (m: ModalKind) => void }) {
 }
 
 function FriendGrid({ dmCount, onModal }: { dmCount: number; onModal: (m: ModalKind) => void }) {
-  const { s, setActive, unfriend, toast } = useOnyx();
+  const { s, setActive, unfriend, toast, showProfile } = useOnyx();
   const [list, setList] = useState<FriendInfo[] | null>(null);
   const [q, setQ] = useState("");
   const [onlineOnly, setOnlineOnly] = useState(false);
@@ -108,12 +109,12 @@ function FriendGrid({ dmCount, onModal }: { dmCount: number; onModal: (m: ModalK
               transition={{ duration: 0.6, delay: Math.min(i, 8) * 0.05, ease: [0.16, 1, 0.3, 1] }}>
               <Tilt className="card flex h-full flex-col p-6" max={6}>
                 <div className="mb-6 flex items-start justify-between">
-                  <Avatar user={f.user} size={72} online={f.user.online} />
-                  <span className="label mt-1">{f.user.online ? "Online" : "Offline"}</span>
+                  <button onClick={() => showProfile(f.user.id)} aria-label={`${f.user.displayName}'s profile`} className="rounded-full transition hover:opacity-80"><Avatar user={f.user} size={72} online={f.user.online} /></button>
+                  <span className="label mt-1 text-right">{presenceLabel(f.user)}</span>
                 </div>
                 <h3 className="display text-[30px]">{f.user.displayName}</h3>
                 <div className="mt-1.5 text-[12.5px] text-mute">@{f.user.username}</div>
-                <p className="mt-4 line-clamp-2 min-h-[2.8em] text-[14.5px] leading-relaxed text-white/70 italic">{f.user.bio || "No bio yet."}</p>
+                <p className="mt-4 line-clamp-2 min-h-[2.8em] text-[14.5px] leading-relaxed text-white/70 italic">{f.user.status ? `“${f.user.status}”` : f.user.bio || "No bio yet."}</p>
                 <div className="mt-5 flex gap-4 border-t border-white/10 pt-4 text-[12px] text-mute">
                   <span>Friends since {since(f.since)}</span>
                   {groupsWith(f.user.id) > 0 && <span>· {groupsWith(f.user.id)} shared group{groupsWith(f.user.id) > 1 ? "s" : ""}</span>}

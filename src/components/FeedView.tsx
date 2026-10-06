@@ -20,6 +20,8 @@ export function FeedView({ onImage }: { onImage: (src: string) => void }) {
   const { s } = useOnyx();
   const me = s.me!;
   const [viewer, setViewer] = useState<string | null>(null);
+  const [filter, setFilter] = useState<"all" | "photos" | "mine">("all");
+  const posts = s.posts.filter((p) => (filter === "photos" ? !!p.image : filter === "mine" ? p.userId === me.id : true));
   const [composing, setComposing] = useState(false);
 
   return (
@@ -34,9 +36,16 @@ export function FeedView({ onImage }: { onImage: (src: string) => void }) {
         <StoryRow onOpen={setViewer} onCompose={() => setComposing(true)} />
         <PostComposer />
 
+        <div className="mt-7 flex gap-1.5" role="tablist" aria-label="Filter posts">
+          {([["all", "Everything"], ["photos", "Photos"], ["mine", "Mine"]] as const).map(([id, label]) => (
+            <button key={id} role="tab" aria-selected={filter === id} onClick={() => setFilter(id)}
+              className={`rounded-full border px-4 py-1.5 text-[12.5px] transition ${filter === id ? "border-white bg-white text-black" : "border-white/14 text-mute hover:text-white"}`}>{label}</button>
+          ))}
+        </div>
+
         {!s.feedLoaded ? (
           <div className="mt-8 space-y-5" aria-busy="true" aria-label="Loading moments">{[0, 1].map((i) => <div key={i} className="skeleton h-56 rounded-[22px]" style={{ animationDelay: `${i * 120}ms` }} />)}</div>
-        ) : s.posts.length === 0 ? (
+        ) : posts.length === 0 ? (
           <div className="card mt-8 p-10 text-center">
             <p className="display text-[34px]">Nothing posted <em>yet.</em></p>
             <p className="mx-auto mt-3 max-w-xs text-[14.5px] text-mute">Be the first. Share a thought or a photo — your friends will see it instantly.</p>
@@ -44,7 +53,7 @@ export function FeedView({ onImage }: { onImage: (src: string) => void }) {
         ) : (
           <div className="mt-8 space-y-5 [perspective:1600px]">
             <AnimatePresence initial={false}>
-              {s.posts.map((p) => <PostCard key={p.id} post={p} author={s.users[p.userId]} mine={p.userId === me.id} onImage={onImage} />)}
+              {posts.map((p) => <PostCard key={p.id} post={p} author={s.users[p.userId]} mine={p.userId === me.id} onImage={onImage} />)}
             </AnimatePresence>
           </div>
         )}
@@ -146,7 +155,7 @@ function PostComposer() {
 /* ───────────── post card ───────────── */
 
 function PostCard({ post, author, mine, onImage }: { post: Post; author?: User; mine: boolean; onImage: (src: string) => void }) {
-  const { s, likePost, deletePost } = useOnyx();
+  const { s, likePost, deletePost, showProfile } = useOnyx();
   const liked = post.likes.includes(s.me!.id);
   const [open, setOpen] = useState(false);
   const [burst, setBurst] = useState(0);
@@ -155,7 +164,7 @@ function PostCard({ post, author, mine, onImage }: { post: Post; author?: User; 
     <motion.article layout="position" initial={{ opacity: 0, y: 40, rotateX: -10 }} animate={{ opacity: 1, y: 0, rotateX: 0 }} exit={{ opacity: 0, scale: 0.96 }} transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1] }}>
       <Tilt className="card p-6" max={2.5}>
         <header className="flex items-center gap-4">
-          <Avatar user={author} size={46} online={author?.online} />
+          <button onClick={() => showProfile(post.userId)} aria-label={`${author?.displayName ?? "Someone"}'s profile`} className="rounded-full transition hover:opacity-80"><Avatar user={author} size={46} online={author?.online} /></button>
           <div className="min-w-0 flex-1">
             <div className="truncate font-display text-[21px] leading-none">{mine ? "You" : author?.displayName}</div>
             <div className="mt-1.5 text-[12px] text-mute">{ago(post.createdAt)}</div>

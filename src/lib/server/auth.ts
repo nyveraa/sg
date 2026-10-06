@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import { cookies } from "next/headers";
 import { one, run } from "./db";
 import { ApiError } from "./api";
-import { toUser } from "./service";
+import { toUser, touchSeen } from "./service";
 
 const COOKIE = "onyx_session";
 const TTL = 1000 * 60 * 60 * 24 * 30;
@@ -39,5 +39,6 @@ export async function currentUser() {
 export async function requireUser() {
   const u = await currentUser();
   if (!u) throw new ApiError(401, "Not signed in");
+  touchSeen(u.id); // feeds "last active"
   return u;
 }

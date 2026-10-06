@@ -1,7 +1,7 @@
 import { requireUser } from "@/lib/server/auth";
 import { route } from "@/lib/server/api";
 import { subscribe } from "@/lib/server/bus";
-import { broadcastPresence } from "@/lib/server/service";
+import { broadcastPresence, touchSeen } from "@/lib/server/service";
 import type { ServerEvent } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -18,14 +18,14 @@ export const GET = route(async (req) => {
         try { controller.enqueue(enc.encode(chunk)); } catch { cleanup(); }
       };
       const sub = subscribe(me.id, (e: ServerEvent) => send(`data: ${JSON.stringify(e)}\n\n`));
-      if (sub.first) broadcastPresence(me.id, true);
+      if (sub.first) { touchSeen(me.id, true); broadcastPresence(me.id, true); }
       const ping = setInterval(() => send(": ping\n\n"), 15_000);
       let closed = false;
       cleanup = () => {
         if (closed) return;
         closed = true;
         clearInterval(ping);
-        if (sub.unsubscribe()) broadcastPresence(me.id, false);
+        if (sub.unsubscribe()) { touchSeen(me.id, true); broadcastPresence(me.id, false); }
         try { controller.close(); } catch { /* already closed */ }
       };
       req.signal.addEventListener("abort", cleanup);

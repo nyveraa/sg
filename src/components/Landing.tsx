@@ -7,7 +7,7 @@ import { ArrowDown } from "lucide-react";
 import { api } from "@/lib/client/api";
 import { AuthCard, type AuthMode } from "./AuthCard";
 import { Avatar } from "./Avatar";
-import { Mark, Wordmark } from "./Logo";
+import { Wordmark } from "./Logo";
 import { Reveal, Rise } from "./Reveal";
 import { HeroScene } from "./Scene";
 import { Tilt } from "./Tilt";
@@ -74,7 +74,7 @@ export function Landing({ invite }: { invite?: InviteInfo }) {
 
       {/* top bar */}
       <header className="fixed inset-x-0 top-0 z-40 flex items-center justify-between bg-gradient-to-b from-black via-black/70 to-transparent px-6 pt-5 pb-10 sm:px-10 lg:px-14">
-        <Wordmark size={24} />
+        <Wordmark size={30} />
         <div className="flex items-center gap-3">
           <button onClick={() => toForm("login")} className="btn btn-ghost btn-sm">Sign in</button>
           <button onClick={() => toForm("signup")} className="btn btn-sm hidden sm:inline-flex">Request entry</button>
@@ -160,7 +160,7 @@ export function Landing({ invite }: { invite?: InviteInfo }) {
         </section>
 
         <footer className="mx-auto flex max-w-[1400px] items-center justify-between px-6 pb-8 sm:px-10 lg:px-14">
-          <span className="label">© onyx.</span><Mark size={20} className="text-white/40" />
+          <span className="label">© Whisper</span><span className="label">Speak in the dark.</span>
         </footer>
       </div>
     </main>
@@ -175,10 +175,9 @@ function Curtain() {
       <motion.div className="absolute inset-x-0 top-0 h-1/2 bg-black" exit={{ y: "-101%" }} transition={{ duration: 1.2, ease }} />
       <motion.div className="absolute inset-x-0 bottom-0 h-1/2 bg-black" exit={{ y: "101%" }} transition={{ duration: 1.2, ease }} />
       <motion.div className="absolute inset-0 grid place-items-center" exit={{ opacity: 0, scale: 1.2 }} transition={{ duration: 0.5 }}>
-        <div className="flex flex-col items-center gap-6">
-          <Mark size={84} draw className="text-white" />
-          <motion.div initial={{ opacity: 0, letterSpacing: "0.1em" }} animate={{ opacity: 1, letterSpacing: "-0.02em" }} transition={{ delay: 0.7, duration: 1.2 }} className="font-display text-[34px]">onyx.</motion.div>
-        </div>
+        <motion.div initial={{ opacity: 0, filter: "blur(10px)", y: 8 }} animate={{ opacity: 1, filter: "blur(0px)", y: 0 }} transition={{ delay: 0.2, duration: 1.4, ease: [0.2, 0.8, 0.2, 1] }}>
+          <Wordmark size={76} />
+        </motion.div>
       </motion.div>
     </motion.div>
   );
@@ -188,12 +187,12 @@ function TicketMock() {
   return (
     <Tilt className="card relative max-w-[420px] overflow-hidden p-6" max={9}>
       <div className="sheen pointer-events-none absolute inset-0" />
-      <div className="flex items-center justify-between"><Mark size={24} /><span className="label">Single use · 7 days</span></div>
+      <div className="flex items-center justify-between"><Wordmark size={22} /><span className="label">Single use · 7 days</span></div>
       <div className="my-8 text-center font-mono text-[34px] font-medium tracking-[0.14em] metal">K7Q2–M9XD</div>
       <div className="relative -mx-6 border-t border-dashed border-white/20">
         <span className="absolute -top-2.5 -left-2.5 h-5 w-5 rounded-full bg-[#050506] ring-1 ring-white/15" /><span className="absolute -top-2.5 -right-2.5 h-5 w-5 rounded-full bg-[#050506] ring-1 ring-white/15" />
       </div>
-      <div className="mt-4 flex justify-between text-[12px] text-mute"><span>onyx.app/join/K7Q2M9XD</span><span className="italic">one door, once</span></div>
+      <div className="mt-4 flex justify-between text-[12px] text-mute"><span>nocturne.app/join/K7Q2M9XD</span><span className="italic">one door, once</span></div>
     </Tilt>
   );
 }

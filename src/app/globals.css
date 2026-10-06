@@ -4,6 +4,7 @@
   --font-display: var(--font-garamond), "EB Garamond", Garamond, Baskerville, serif;
   --font-sans: var(--font-instrument), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-martian), ui-monospace, monospace;
+  --font-wordmark: var(--font-cormorant), "Cormorant Garamond", Garamond, Georgia, serif;
   --color-ink: #000;
   --color-panel: #060607;
   --color-raise: #0c0c0e;
@@ -14,7 +15,13 @@
   --color-accent: #fff;
 }
 
-:root { color-scheme: dark; }
+:root { color-scheme: dark; --acc-a: #ffffff; --acc-b: #d6d6dc; --acc-glow: 255 255 255; }
+/* accent tints: restrained pastels that only touch buttons, bubbles and badges */
+[data-accent=ice] { --acc-a: #f4f9ff; --acc-b: #b3d1ff; --acc-glow: 179 209 255; }
+[data-accent=rose] { --acc-a: #fff4f6; --acc-b: #ffc2cf; --acc-glow: 255 194 207; }
+[data-accent=amber] { --acc-a: #fff8ec; --acc-b: #ffd89a; --acc-glow: 255 216 154; }
+[data-accent=mint] { --acc-a: #f2fff9; --acc-b: #b2f0d2; --acc-glow: 178 240 210; }
+[data-accent=violet] { --acc-a: #f7f3ff; --acc-b: #cdbcff; --acc-glow: 205 188 255; }
 html, body { height: 100%; background: #000; }
 body {
   color: #f4f4f5;
@@ -56,6 +63,7 @@ body::after { /* film grain: viewport-sized, tiled, jittered a few times a secon
 
 /* ───────── type ───────── */
 .font-display { font-family: var(--font-display); }
+.font-wordmark { font-family: var(--font-cormorant), "Cormorant Garamond", Georgia, serif; }
 .display { font-family: var(--font-display); font-weight: 400; letter-spacing: -0.025em; line-height: .96; }
 .display em, .em { font-style: italic; font-weight: 400; }
 .label { font-family: var(--font-sans); font-size: 10.5px; letter-spacing: .2em; text-transform: uppercase; color: var(--color-mute); font-weight: 500; }
@@ -68,7 +76,7 @@ body::after { /* film grain: viewport-sized, tiled, jittered a few times a secon
 .btn {
   position: relative; display: inline-flex; align-items: center; justify-content: center; gap: .7rem; overflow: hidden; white-space: nowrap;
   height: 48px; padding: 0 26px; border-radius: 999px; color: #000;
-  background: linear-gradient(180deg, #ffffff 0%, #d9d9de 100%);
+  background: linear-gradient(180deg, var(--acc-a) 0%, var(--acc-b) 100%);
   font-family: var(--font-sans); font-size: 12px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase;
   box-shadow: 0 1px 0 #fff inset, 0 10px 30px -10px rgb(255 255 255 / .35);
   transition: transform .25s cubic-bezier(.2,.8,.2,1), box-shadow .25s;
@@ -152,3 +160,23 @@ body::after { /* film grain: viewport-sized, tiled, jittered a few times a secon
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+/* ───────── personalization: wallpapers, bubbles, text size, density, effects level ───────── */
+.chat-bg { background-repeat: repeat; }
+.chat-bg[data-wp="aurora"] { background-image: radial-gradient(900px 520px at 12% 0%, rgb(var(--acc-glow) / .08), transparent 62%), radial-gradient(760px 520px at 100% 100%, rgb(255 255 255 / .055), transparent 62%); background-repeat: no-repeat; }
+.chat-bg[data-wp="grid"] { background-image: linear-gradient(rgb(255 255 255 / .04) 1px, transparent 1px), linear-gradient(90deg, rgb(255 255 255 / .04) 1px, transparent 1px); background-size: 38px 38px; }
+.chat-bg[data-wp="dots"] { background-image: radial-gradient(rgb(255 255 255 / .12) 1px, transparent 1.2px); background-size: 24px 24px; }
+.chat-bg[data-wp="stars"] { background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='260' height='260'><g fill='white'><circle cx='20' cy='30' r='1' opacity='.5'/><circle cx='90' cy='70' r='.8' opacity='.4'/><circle cx='170' cy='20' r='1.2' opacity='.6'/><circle cx='230' cy='110' r='.8' opacity='.35'/><circle cx='60' cy='150' r='1.1' opacity='.5'/><circle cx='140' cy='190' r='.8' opacity='.4'/><circle cx='210' cy='230' r='1' opacity='.55'/><circle cx='30' cy='235' r='.8' opacity='.35'/></g></svg>"); background-size: 260px 260px; }
+.chat-bg[data-wp="silk"] { background-image: linear-gradient(125deg, rgb(255 255 255 / .05), transparent 32%, rgb(var(--acc-glow) / .045) 62%, transparent 85%), linear-gradient(-35deg, rgb(255 255 255 / .035), transparent 40%); background-repeat: no-repeat; }
+
+[data-text="sm"] .msg-text { font-size: 14px; }
+[data-text="lg"] .msg-text { font-size: 18px; line-height: 1.5; }
+[data-compact="true"] .msg-in-left, [data-compact="true"] .msg-in-right { margin-bottom: .125rem !important; }
+[data-compact="true"] .msg-text { line-height: 1.38; }
+
+/* effects level: "lite" drops the always-on decoration; "off" also stills every animation */
+[data-fx="lite"] body::after, [data-fx="off"] body::after { display: none; }
+[data-fx="lite"] .aurora i, [data-fx="off"] .aurora i { animation: none; }
+[data-fx="off"] *, [data-fx="off"] *::before, [data-fx="off"] *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+
+@keyframes name-in { from { opacity: 0; letter-spacing: .18em; filter: blur(10px); transform: translateY(8px) } to { opacity: 1; letter-spacing: .005em; filter: blur(0); transform: none } }

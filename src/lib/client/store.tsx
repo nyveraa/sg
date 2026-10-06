@@ -6,19 +6,23 @@ import {
 } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "./api";
-import { sfx } from "./sound";
-import type { Bootstrap, Conversation, Effect, Message, Post, ServerEvent, User } from "../types";
+import { previewOf } from "./format";
+import { configureSound, sfx } from "./sound";
+import { sanitizePrefs, type Prefs } from "../prefs";
+import type { Bootstrap, Conversation, Effect, Me, Message, Post, ServerEvent, User } from "../types";
 
 /* ───────────── state ───────────── */
 
 type S = {
-  me: User | null;
-  users: Record<string, User>;
+  me: Me | null;
+  rawUsers: Record<string, User>;
+  nicknames: Record<string, string>;
   convs: Record<string, Conversation>;
   msgs: Record<string, Message[]>;
   more: Record<string, boolean>; // older messages may exist
   loaded: Record<string, boolean>; // full history fetched (vs. just the preview message)
   typing: Record<string, Record<string, number>>;
+  unreadFrom: Record<string, { from: number; count: number }>; // where the "new messages" divider goes
   posts: Post[]; // newest first
   stories: Post[]; // oldest first, last 24h
   feedLoaded: boolean;
@@ -30,18 +34,29 @@ type A =
   | { t: "post_update"; post: Post }
   | { t: "post_removed"; id: number }
   | { t: "friend_removed"; userId: string; convId: string }
+  | { t: "conv_removed"; convId: string }
   | { t: "boot"; data: Bootstrap }
   | { t: "conv"; conv: Conversation; users: User[] }
   | { t: "msgs"; convId: string; msgs: Message[]; older?: boolean }
   | { t: "msg"; m: Message; unread: boolean }
+  | { t: "pending"; m: Message }
+  | { t: "confirm"; tempId: number; m: Message }
+  | { t: "mark"; tempId: number; patch: Partial<Message> }
+  | { t: "drop"; convId: string; tempId: number }
   | { t: "upd"; m: Message }
   | { t: "read"; convId: string; userId: string; lastReadId: number }
   | { t: "typing"; convId: string; userId: string }
-  | { t: "presence"; userId: string; online: boolean }
+  | { t: "presence"; userId: string; online: boolean; lastSeen: number | null }
   | { t: "user"; user: User }
+  | { t: "me"; me: Me }
+  | { t: "nicknames"; nicknames: Record<string, string> }
+  | { t: "open"; convId: string; from: number; count: number }
   | { t: "seen"; convId: string };
 
-const empty: S = { me: null, users: {}, convs: {}, msgs: {}, more: {}, loaded: {}, typing: {}, posts: [], stories: [], feedLoaded: false };
+const empty: S = {
+  me: null, rawUsers: {}, nicknames: {}, convs: {}, msgs: {}, more: {}, loaded: {}, typing: {}, unreadFrom: {},
+  posts: [], stories: [], feedLoaded: false,
+};
 const byId = <T extends { id: string }>(xs: T[]) => Object.fromEntries(xs.map((x) => [x.id, x]));
 const swap = (xs: Post[], p: Post) => xs.map((x) => (x.id === p.id ? p : x));
 
@@ -63,16 +78,23 @@ function reducer(s: S, a: A): S {
       const keep = (p: Post) => p.userId !== a.userId || p.userId === s.me?.id;
       return { ...s, convs, msgs, posts: s.posts.filter(keep), stories: s.stories.filter(keep) };
     }
+    case "conv_removed": {
+      const { [a.convId]: _c, ...convs } = s.convs;
+      const { [a.convId]: _m, ...msgs } = s.msgs;
+      return { ...s, convs, msgs };
+    }
     case "boot":
-      return { ...empty, me: a.data.me, users: byId(a.data.users), convs: byId(a.data.conversations), posts: s.posts, stories: s.stories, feedLoaded: s.feedLoaded };
+      return { ...empty, me: a.data.me, rawUsers: byId(a.data.users), convs: byId(a.data.conversations), nicknames: a.data.nicknames,
+        posts: s.posts, stories: s.stories, feedLoaded: s.feedLoaded, unreadFrom: s.unreadFrom };
     case "conv": {
       const prev = s.convs[a.conv.id];
-      return { ...s, convs: { ...s.convs, [a.conv.id]: a.conv }, users: { ...s.users, ...byId(a.users) },
+      return { ...s, convs: { ...s.convs, [a.conv.id]: a.conv }, rawUsers: { ...s.rawUsers, ...byId(a.users) },
         msgs: prev ? s.msgs : { ...s.msgs, [a.conv.id]: a.conv.last ? [a.conv.last] : [] } };
     }
     case "msgs": {
       const cur = s.msgs[a.convId] ?? [];
-      const merged = a.older ? [...a.msgs, ...cur] : a.msgs;
+      const keep = cur.filter((m) => m.pending || m.failed); // unsent messages survive a refetch
+      const merged = a.older ? [...a.msgs, ...cur] : [...a.msgs, ...keep];
       return { ...s, msgs: { ...s.msgs, [a.convId]: merged }, more: { ...s.more, [a.convId]: a.msgs.length >= 60 },
         loaded: { ...s.loaded, [a.convId]: true } };
     }
@@ -80,16 +102,43 @@ function reducer(s: S, a: A): S {
       const list = s.msgs[a.m.convId];
       const conv = s.convs[a.m.convId];
       if (list?.some((x) => x.id === a.m.id)) return s;
+      const mine = a.m.senderId === s.me?.id;
+      let next = list;
+      if (list && mine && a.m.kind === "text") { // the server's copy of something we already showed optimistically
+        const i = list.findIndex((x) => x.id < 0 && x.body === a.m.body);
+        if (i >= 0) next = list.filter((_, k) => k !== i);
+      }
       return {
         ...s,
-        msgs: list ? { ...s.msgs, [a.m.convId]: [...list, a.m] } : s.msgs,
+        msgs: next ? { ...s.msgs, [a.m.convId]: [...next, a.m] } : s.msgs,
         convs: conv ? { ...s.convs, [a.m.convId]: { ...conv, last: a.m, updatedAt: a.m.createdAt,
-          unread: conv.unread + (a.unread ? 1 : 0),
-          reads: a.m.senderId in conv.reads ? { ...conv.reads, [a.m.senderId]: a.m.id } : conv.reads } } : s.convs,
+          unread: conv.unread + (a.unread ? 1 : 0), archived: conv.archived && (mine || conv.muted),
+          reads: a.m.senderId in conv.reads && conv.reads[a.m.senderId] !== 0 ? { ...conv.reads, [a.m.senderId]: a.m.id } : conv.reads } } : s.convs,
         typing: s.typing[a.m.convId]?.[a.m.senderId]
           ? { ...s.typing, [a.m.convId]: { ...s.typing[a.m.convId], [a.m.senderId]: 0 } } : s.typing,
       };
     }
+    case "pending": {
+      const list = s.msgs[a.m.convId] ?? [];
+      return { ...s, msgs: { ...s.msgs, [a.m.convId]: [...list, a.m] } };
+    }
+    case "confirm": {
+      const without = (s.msgs[a.m.convId] ?? []).filter((x) => x.id !== a.tempId);
+      const has = without.some((x) => x.id === a.m.id);
+      const conv = s.convs[a.m.convId];
+      return {
+        ...s,
+        msgs: { ...s.msgs, [a.m.convId]: has ? without : [...without, a.m] },
+        convs: conv ? { ...s.convs, [a.m.convId]: { ...conv, last: a.m, updatedAt: a.m.createdAt, archived: false } } : s.convs,
+      };
+    }
+    case "mark": {
+      const convId = Object.keys(s.msgs).find((k) => s.msgs[k].some((x) => x.id === a.tempId));
+      if (!convId) return s;
+      return { ...s, msgs: { ...s.msgs, [convId]: s.msgs[convId].map((x) => (x.id === a.tempId ? { ...x, ...a.patch } : x)) } };
+    }
+    case "drop":
+      return { ...s, msgs: { ...s.msgs, [a.convId]: (s.msgs[a.convId] ?? []).filter((x) => x.id !== a.tempId) } };
     case "upd": {
       const list = s.msgs[a.m.convId];
       const conv = s.convs[a.m.convId];
@@ -110,29 +159,50 @@ function reducer(s: S, a: A): S {
       const c = s.convs[a.convId];
       return c && c.unread ? { ...s, convs: { ...s.convs, [a.convId]: { ...c, unread: 0 } } } : s;
     }
+    case "open":
+      return { ...s, unreadFrom: { ...s.unreadFrom, [a.convId]: { from: a.from, count: a.count } } };
     case "typing":
       return { ...s, typing: { ...s.typing, [a.convId]: { ...s.typing[a.convId], [a.userId]: Date.now() } } };
     case "presence":
-      return s.users[a.userId] ? { ...s, users: { ...s.users, [a.userId]: { ...s.users[a.userId], online: a.online } } } : s;
+      return s.rawUsers[a.userId] ? { ...s, rawUsers: { ...s.rawUsers, [a.userId]: { ...s.rawUsers[a.userId], online: a.online, lastSeen: a.lastSeen } } } : s;
     case "user":
-      return { ...s, users: { ...s.users, [a.user.id]: a.user }, me: s.me?.id === a.user.id ? a.user : s.me };
+      return a.user.id === s.me?.id ? s : { ...s, rawUsers: { ...s.rawUsers, [a.user.id]: a.user } };
+    case "me":
+      return { ...s, me: a.me, rawUsers: { ...s.rawUsers, [a.me.id]: a.me } };
+    case "nicknames":
+      return { ...s, nicknames: a.nicknames };
   }
 }
 
 /* ───────────── context ───────────── */
 
-export type View = "chats" | "feed" | "friends";
 export type Toast = { id: number; text: string; tone?: "error" | "ok" };
 export type Celebration = { user: User; convId: string };
+export type View = "chats" | "feed" | "friends";
+export type ProfilePatch = { displayName?: string; bio?: string; status?: string; pronouns?: string; avatar?: string | null };
 
-type Ctx = {
-  s: S;
+/** What components read. `users` already has your private nicknames applied. */
+export type StateView = Omit<S, "rawUsers" | "me"> & { me: Me | null; users: Record<string, User> };
+
+type StateCtxValue = {
+  s: StateView;
   ready: boolean;
   active: string | null;
-  setActive: (id: string | null) => void;
   view: View;
+  celebration: Celebration | null;
+  toasts: Toast[];
+  friends: User[];
+  totalUnread: number;
+  profileUserId: string | null;
+};
+
+/** Stable for the life of the provider — components that only *do* things subscribe to this and never re-render for state. */
+type Actions = {
+  setActive: (id: string | null) => void;
   setView: (v: View) => void;
   send: (convId: string, input: { body?: string; image?: string; voice?: { audio: string; duration: number; peaks: number[] }; replyTo?: number }) => Promise<boolean>;
+  retry: (tempId: number) => void;
+  discard: (convId: string, tempId: number) => void;
   loadOlder: (convId: string) => Promise<void>;
   react: (id: number, emoji: string) => void;
   edit: (id: number, body: string) => Promise<void>;
@@ -146,23 +216,38 @@ type Ctx = {
   redeem: (code: string) => Promise<void>;
   mint: () => Promise<{ code: string; expiresAt: number }>;
   createGroup: (title: string, memberIds: string[]) => Promise<void>;
-  saveProfile: (p: { displayName?: string; bio?: string }) => Promise<void>;
+  renameGroup: (convId: string, title: string) => Promise<void>;
+  addMembers: (convId: string, userIds: string[]) => Promise<void>;
+  leaveGroup: (convId: string) => Promise<void>;
+  setConvPrefs: (convId: string, patch: { pinned?: boolean; muted?: boolean; archived?: boolean }) => void;
+  saveProfile: (p: ProfilePatch) => Promise<void>;
+  setPrefs: (p: Partial<Prefs>) => void;
+  setNickname: (userId: string, nickname: string) => Promise<void>;
   logout: () => Promise<void>;
   fxRef: React.RefObject<((e: Effect) => void) | null>;
-  celebration: Celebration | null;
   closeCelebration: () => void;
-  toasts: Toast[];
   toast: (text: string, tone?: Toast["tone"]) => void;
-  friends: User[];
-  totalUnread: number;
+  showProfile: (userId: string | null) => void;
 };
 
-const C = createContext<Ctx | null>(null);
-export const useOnyx = () => {
-  const v = useContext(C);
-  if (!v) throw new Error("useOnyx outside provider");
+export type Ctx = StateCtxValue & Actions;
+
+const StateC = createContext<StateCtxValue | null>(null);
+const ActionsC = createContext<Actions | null>(null);
+
+export const useActions = () => {
+  const v = useContext(ActionsC);
+  if (!v) throw new Error("useActions outside provider");
   return v;
 };
+export const useOnyx = (): Ctx => {
+  const st = useContext(StateC);
+  const ac = useContext(ActionsC);
+  if (!st || !ac) throw new Error("useOnyx outside provider");
+  return useMemo(() => ({ ...st, ...ac }), [st, ac]);
+};
+
+let tempSeq = 0;
 
 export function OnyxProvider({ children }: { children: ReactNode }) {
   const router = useRouter();
@@ -173,6 +258,7 @@ export function OnyxProvider({ children }: { children: ReactNode }) {
   const [view, setView] = useState<View>("chats");
   const [celebration, setCelebration] = useState<Celebration | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [profileUserId, showProfile] = useState<string | null>(null);
   const fxRef = useRef<((e: Effect) => void) | null>(null);
   const sRef = useRef(s); sRef.current = s;
   const activeRef = useRef(active); activeRef.current = active;
@@ -181,12 +267,22 @@ export function OnyxProvider({ children }: { children: ReactNode }) {
   const lastTyping = useRef(0);
   const loaded = useRef(new Set<string>()); // conversations whose history has been fetched
 
+  /** users with private nicknames layered on top */
+  const users = useMemo(() => {
+    const out: Record<string, User> = {};
+    for (const [id, u] of Object.entries(s.rawUsers)) {
+      const nick = s.nicknames[id];
+      out[id] = nick && id !== s.me?.id ? { ...u, displayName: nick, realName: u.displayName } : u;
+    }
+    return out;
+  }, [s.rawUsers, s.nicknames, s.me?.id]);
+  const usersRef = useRef(users); usersRef.current = users;
+
   const toast = useCallback((text: string, tone?: Toast["tone"]) => {
     const id = Date.now() + Math.random();
     setToasts((t) => [...t.slice(-3), { id, text, tone }]);
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 4200);
   }, []);
-
   const fail = useCallback((e: unknown) => toast(e instanceof Error ? e.message : "Something went wrong", "error"), [toast]);
 
   const fetchMessages = useCallback(async (convId: string, before?: number) => {
@@ -196,8 +292,7 @@ export function OnyxProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const markRead = useCallback((convId: string) => {
-    const c = sRef.current.convs[convId];
-    if (!c) return;
+    if (!sRef.current.convs[convId]) return;
     dispatch({ t: "seen", convId });
     void api("POST", `/api/conversations/${convId}/read`).catch(() => {});
   }, []);
@@ -205,10 +300,21 @@ export function OnyxProvider({ children }: { children: ReactNode }) {
   const setActive = useCallback((id: string | null) => {
     setActiveState(id);
     if (!id) return;
-    setView("chats"); // opening a chat from anywhere (friends, celebration) lands in Chats
+    setView("chats"); // opening a chat from anywhere (friends, celebration, palette) lands in Chats
+    const c = sRef.current.convs[id], me = sRef.current.me;
+    if (c && me) dispatch({ t: "open", convId: id, from: c.reads[me.id] ?? 0, count: c.unread });
     if (!loaded.current.has(id)) void fetchMessages(id).catch(() => {});
     markRead(id);
   }, [fetchMessages, markRead]);
+
+  const notify = useCallback((m: Message) => {
+    const st = sRef.current, prefs = st.me?.prefs;
+    if (!prefs?.notifications || typeof Notification === "undefined" || Notification.permission !== "granted") return;
+    if (st.convs[m.convId]?.muted || (!document.hidden && activeRef.current === m.convId)) return;
+    try {
+      new Notification(usersRef.current[m.senderId]?.displayName ?? "Whisper", { body: previewOf(m, usersRef.current, st.me!.id).replace(/^You: /, ""), tag: m.convId, silent: true });
+    } catch { /* notifications blocked */ }
+  }, []);
 
   /** Side effects of a message appearing (once per id): sound, fullscreen effects, unread. */
   const ingest = useCallback((m: Message) => {
@@ -219,11 +325,11 @@ export function OnyxProvider({ children }: { children: ReactNode }) {
     seen.current.add(m.id);
     dispatch({ t: "msg", m, unread: !mine && m.kind !== "system" && !viewing });
     if (!fresh) return;
-    if (!mine && m.kind !== "system") sfx.receive();
+    if (!mine && m.kind !== "system") { if (!st.convs[m.convId]?.muted) sfx.receive(); notify(m); }
     if (m.kind === "effect" && Date.now() - m.createdAt < 8000 && (mine || activeRef.current === m.convId))
       fxRef.current?.((m.data as { effect: Effect }).effect);
     if (viewing && !mine) markRead(m.convId);
-  }, [markRead]);
+  }, [markRead, notify]);
 
   const celebrate = useCallback((user: User, convId: string) => {
     if (celebrated.current.has(convId)) return;
@@ -279,8 +385,13 @@ export function OnyxProvider({ children }: { children: ReactNode }) {
         case "message_update": dispatch({ t: "upd", m: e.message }); break;
         case "read": dispatch({ t: "read", convId: e.convId, userId: e.userId, lastReadId: e.lastReadId }); break;
         case "typing": dispatch({ t: "typing", convId: e.convId, userId: e.userId }); break;
-        case "presence": dispatch({ t: "presence", userId: e.userId, online: e.online }); break;
+        case "presence": dispatch({ t: "presence", userId: e.userId, online: e.online, lastSeen: e.lastSeen }); break;
         case "user": dispatch({ t: "user", user: e.user }); break;
+        case "me": dispatch({ t: "me", me: e.me }); break;
+        case "conversation_removed":
+          if (activeRef.current === e.convId) setActiveState(null);
+          dispatch({ t: "conv_removed", convId: e.convId });
+          break;
         case "conversation": {
           const isNew = !sRef.current.convs[e.conversation.id];
           dispatch({ t: "conv", conv: e.conversation, users: e.users });
@@ -305,6 +416,16 @@ export function OnyxProvider({ children }: { children: ReactNode }) {
     return () => es.close();
   }, [booted, ingest, celebrate, fetchMessages]);
 
+  /* preferences → <html> attributes + sound engine */
+  const prefs = s.me?.prefs;
+  useEffect(() => {
+    if (!prefs) return;
+    const r = document.documentElement;
+    r.dataset.accent = prefs.accent; r.dataset.wallpaper = prefs.wallpaper; r.dataset.bubbles = prefs.bubbles;
+    r.dataset.text = prefs.textSize; r.dataset.fx = prefs.effects; r.dataset.compact = String(prefs.compact);
+    configureSound(prefs);
+  }, [prefs]);
+
   /* clear unread when the window regains focus on an open chat */
   useEffect(() => {
     const onFocus = () => { if (activeRef.current) markRead(activeRef.current); };
@@ -312,68 +433,154 @@ export function OnyxProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("focus", onFocus);
   }, [markRead]);
 
-  const totalUnread = useMemo(() => Object.values(s.convs).reduce((n, c) => n + c.unread, 0), [s.convs]);
-  useEffect(() => { document.title = totalUnread ? `(${totalUnread}) onyx.` : "onyx."; }, [totalUnread]);
+  const totalUnread = useMemo(() => Object.values(s.convs).reduce((n, c) => n + (c.muted ? 0 : c.unread), 0), [s.convs]);
+  useEffect(() => { document.title = totalUnread ? `(${totalUnread}) Whisper` : "Whisper"; }, [totalUnread]);
 
-  const send: Ctx["send"] = useCallback(async (convId, input) => {
-    try {
-      const { message } = await api<{ message: Message }>("POST", `/api/conversations/${convId}/messages`, input);
-      ingest(message);
-      sfx.send();
-      return true;
-    } catch (e) { fail(e); return false; }
-  }, [ingest, fail]);
+  const friends = useMemo(() => {
+    const ids = new Set<string>();
+    for (const c of Object.values(s.convs)) if (c.kind === "dm") c.memberIds.forEach((id) => id !== s.me?.id && ids.add(id));
+    return [...ids].map((id) => users[id]).filter(Boolean);
+  }, [s.convs, users, s.me?.id]);
 
-  const value: Ctx = {
-    s, ready: booted && splashDone, active, setActive, send, view, setView,
-    createPost: useCallback(async (input) => {
-      try { await api("POST", "/api/posts", input); sfx.send(); return true; } catch (e) { fail(e); return false; }
-    }, [fail]),
-    likePost: useCallback((id) => { void api("POST", `/api/posts/${id}/like`).catch(fail); }, [fail]),
-    deletePost: useCallback((id) => { void api("DELETE", `/api/posts/${id}`).catch(fail); }, [fail]),
-    unfriend: useCallback(async (friendId) => { await api("DELETE", `/api/friends/${friendId}`); }, []),
-    loadOlder: useCallback(async (convId) => {
-      const first = sRef.current.msgs[convId]?.[0];
-      if (first) await fetchMessages(convId, first.id).catch(fail);
-    }, [fetchMessages, fail]),
-    react: useCallback((id, emoji) => { void api("POST", `/api/messages/${id}/react`, { emoji }).catch(fail); }, [fail]),
-    edit: useCallback(async (id, body) => { await api("PATCH", `/api/messages/${id}`, { body }).catch(fail); }, [fail]),
-    remove: useCallback((id) => { void api("DELETE", `/api/messages/${id}`).catch(fail); }, [fail]),
-    act: useCallback((id, a) => { void api("POST", `/api/messages/${id}/act`, a).catch(fail); }, [fail]),
-    typing: useCallback((convId) => {
-      if (Date.now() - lastTyping.current < 2500) return;
-      lastTyping.current = Date.now();
-      void api("POST", `/api/conversations/${convId}/typing`).catch(() => {});
-    }, []),
-    redeem: useCallback(async (code) => {
-      const { conversation } = await api<{ conversation: Conversation }>("POST", "/api/invites/redeem", { code });
-      const friendId = conversation.memberIds.find((id) => id !== sRef.current.me?.id);
-      // The live event normally lands first; this makes it work even if the stream is mid-reconnect.
-      if (!sRef.current.convs[conversation.id]) {
-        const boot = await api<Bootstrap>("GET", "/api/bootstrap");
-        dispatch({ t: "boot", data: boot });
-        const friend = boot.users.find((u) => u.id === friendId);
-        if (friend) celebrate(friend, conversation.id);
+  /* ── actions (all stable) ── */
+  const actions = useMemo<Actions>(() => {
+    const findMsg = (id: number) => { for (const list of Object.values(sRef.current.msgs)) { const m = list.find((x) => x.id === id); if (m) return m; } return undefined; };
+    const findPost = (id: number) => sRef.current.posts.find((p) => p.id === id) ?? sRef.current.stories.find((p) => p.id === id);
+
+    /** Post to the server; on success swap the optimistic copy for the real one. */
+    const deliver = async (convId: string, tempId: number | null, input: { body?: string; image?: string; voice?: { audio: string; duration: number; peaks: number[] }; replyTo?: number }) => {
+      try {
+        const { message } = await api<{ message: Message }>("POST", `/api/conversations/${convId}/messages`, input);
+        if (tempId !== null) dispatch({ t: "confirm", tempId, m: message });
+        ingest(message);
+        sfx.send();
+        return true;
+      } catch (e) {
+        if (tempId !== null) dispatch({ t: "mark", tempId, patch: { pending: false, failed: true } });
+        fail(e);
+        return false;
       }
-      setActive(conversation.id);
-    }, [celebrate, setActive]),
-    mint: useCallback(() => api<{ code: string; expiresAt: number }>("POST", "/api/invites"), []),
-    createGroup: useCallback(async (title, memberIds) => {
-      const { conversation } = await api<{ conversation: Conversation }>("POST", "/api/conversations", { title, memberIds });
-      setActive(conversation.id);
-    }, [setActive]),
-    saveProfile: useCallback(async (p) => { await api("PATCH", "/api/me", p); }, []),
-    logout: useCallback(async () => { await api("POST", "/api/auth/logout"); router.replace("/"); }, [router]),
-    fxRef, celebration, closeCelebration: useCallback(() => setCelebration(null), []), toasts, toast,
-    friends: useMemo(() => {
-      const ids = new Set<string>();
-      for (const c of Object.values(s.convs)) if (c.kind === "dm") c.memberIds.forEach((id) => id !== s.me?.id && ids.add(id));
-      return [...ids].map((id) => s.users[id]).filter(Boolean);
-    }, [s.convs, s.users, s.me]),
-    totalUnread,
-  };
+    };
 
-  return <C.Provider value={value}>{children}</C.Provider>;
+    return {
+      setActive, setView, fxRef, showProfile, toast,
+      send: async (convId, input) => {
+        const me = sRef.current.me!;
+        const text = input.body?.trim();
+        // Plain text shows up instantly; commands, images and voice wait for the server (it generates or validates them).
+        if (text && !input.image && !input.voice && !text.startsWith("/")) {
+          const tempId = -(++tempSeq);
+          const rep = input.replyTo ? sRef.current.msgs[convId]?.find((x) => x.id === input.replyTo) : undefined;
+          dispatch({ t: "pending", m: {
+            id: tempId, convId, senderId: me.id, kind: "text", body: text, data: null, createdAt: Date.now(), editedAt: null, deleted: false, reactions: [],
+            replyTo: rep ? { id: rep.id, senderId: rep.senderId, kind: rep.kind, body: rep.kind === "image" ? "" : rep.body.slice(0, 120) } : null, pending: true,
+          } });
+          return deliver(convId, tempId, { ...input, body: text });
+        }
+        return deliver(convId, null, input);
+      },
+      retry: (tempId) => {
+        const m = findMsg(tempId);
+        if (!m) return;
+        dispatch({ t: "mark", tempId, patch: { pending: true, failed: false } });
+        void deliver(m.convId, tempId, { body: m.body, replyTo: m.replyTo?.id });
+      },
+      discard: (convId, tempId) => dispatch({ t: "drop", convId, tempId }),
+      loadOlder: async (convId) => {
+        const first = sRef.current.msgs[convId]?.find((m) => m.id > 0);
+        if (first) await fetchMessages(convId, first.id).catch(fail);
+      },
+      react: (id, emoji) => {
+        const m = findMsg(id), me = sRef.current.me;
+        if (m && me) { // optimistic: flip the chip now, the server's event confirms it
+          const mineNow = m.reactions.find((r) => r.emoji === emoji)?.userIds.includes(me.id);
+          const reactions = mineNow
+            ? m.reactions.map((r) => (r.emoji === emoji ? { ...r, userIds: r.userIds.filter((u) => u !== me.id) } : r)).filter((r) => r.userIds.length)
+            : m.reactions.some((r) => r.emoji === emoji)
+              ? m.reactions.map((r) => (r.emoji === emoji ? { ...r, userIds: [...r.userIds, me.id] } : r))
+              : [...m.reactions, { emoji, userIds: [me.id] }];
+          dispatch({ t: "upd", m: { ...m, reactions } });
+        }
+        void api("POST", `/api/messages/${id}/react`, { emoji }).catch((e) => { if (m) dispatch({ t: "upd", m }); fail(e); });
+      },
+      edit: async (id, body) => { await api("PATCH", `/api/messages/${id}`, { body }).catch(fail); },
+      remove: (id) => { void api("DELETE", `/api/messages/${id}`).catch(fail); },
+      act: (id, a) => { void api("POST", `/api/messages/${id}/act`, a).catch(fail); },
+      createPost: async (input) => {
+        try { await api("POST", "/api/posts", input); sfx.send(); return true; } catch (e) { fail(e); return false; }
+      },
+      likePost: (id) => {
+        const p = findPost(id), me = sRef.current.me;
+        if (p && me) dispatch({ t: "post_update", post: { ...p, likes: p.likes.includes(me.id) ? p.likes.filter((x) => x !== me.id) : [...p.likes, me.id] } });
+        void api("POST", `/api/posts/${id}/like`).catch((e) => { if (p) dispatch({ t: "post_update", post: p }); fail(e); });
+      },
+      deletePost: (id) => { void api("DELETE", `/api/posts/${id}`).catch(fail); },
+      unfriend: async (friendId) => { await api("DELETE", `/api/friends/${friendId}`); },
+      typing: (convId) => {
+        if (Date.now() - lastTyping.current < 1500) return;
+        lastTyping.current = Date.now();
+        void api("POST", `/api/conversations/${convId}/typing`).catch(() => {});
+      },
+      redeem: async (code) => {
+        const { conversation } = await api<{ conversation: Conversation }>("POST", "/api/invites/redeem", { code });
+        const friendId = conversation.memberIds.find((id) => id !== sRef.current.me?.id);
+        // The live event normally lands first; this makes it work even if the stream is mid-reconnect.
+        if (!sRef.current.convs[conversation.id]) {
+          const boot = await api<Bootstrap>("GET", "/api/bootstrap");
+          dispatch({ t: "boot", data: boot });
+          const friend = boot.users.find((u) => u.id === friendId);
+          if (friend) celebrate(friend, conversation.id);
+        }
+        setActive(conversation.id);
+      },
+      mint: () => api<{ code: string; expiresAt: number }>("POST", "/api/invites"),
+      createGroup: async (title, memberIds) => {
+        const { conversation } = await api<{ conversation: Conversation }>("POST", "/api/conversations", { title, memberIds });
+        setActive(conversation.id);
+      },
+      renameGroup: async (convId, title) => { await api("PATCH", `/api/conversations/${convId}`, { title }); },
+      addMembers: async (convId, userIds) => { await api("POST", `/api/conversations/${convId}/members`, { userIds }); },
+      leaveGroup: async (convId) => {
+        await api("DELETE", `/api/conversations/${convId}/members/me`);
+        if (activeRef.current === convId) setActiveState(null);
+      },
+      setConvPrefs: (convId, patch) => {
+        const c = sRef.current.convs[convId];
+        if (c) dispatch({ t: "conv", conv: { ...c, ...patch }, users: [] });
+        void api("POST", `/api/conversations/${convId}/prefs`, patch).catch((e) => { if (c) dispatch({ t: "conv", conv: c, users: [] }); fail(e); });
+      },
+      saveProfile: async (p) => { const { me } = await api<{ me: Me }>("PATCH", "/api/me", p); dispatch({ t: "me", me }); },
+      setPrefs: (p) => {
+        const me = sRef.current.me;
+        if (!me) return;
+        const before = me.prefs;
+        dispatch({ t: "me", me: { ...me, prefs: sanitizePrefs(p, before) } }); // applies instantly (accent, wallpaper…)
+        void api<{ me: Me }>("PATCH", "/api/me", { prefs: p }).catch((e) => { dispatch({ t: "me", me: { ...me, prefs: before } }); fail(e); });
+      },
+      setNickname: async (userId, nickname) => {
+        const { nicknames } = await api<{ nicknames: Record<string, string> }>("PUT", `/api/nicknames/${userId}`, { nickname });
+        dispatch({ t: "nicknames", nicknames });
+      },
+      logout: async () => { await api("POST", "/api/auth/logout"); router.replace("/"); },
+      closeCelebration: () => setCelebration(null),
+    };
+  }, [setActive, ingest, fail, toast, fetchMessages, celebrate, router]);
+
+  const stateView = useMemo<StateView>(() => {
+    const { rawUsers: _r, ...rest } = s;
+    void _r;
+    return { ...rest, users };
+  }, [s, users]);
+
+  const stateValue = useMemo<StateCtxValue>(
+    () => ({ s: stateView, ready: booted && splashDone, active, view, celebration, toasts, friends, totalUnread, profileUserId }),
+    [stateView, booted, splashDone, active, view, celebration, toasts, friends, totalUnread, profileUserId]);
+
+  return (
+    <ActionsC.Provider value={actions}>
+      <StateC.Provider value={stateValue}>{children}</StateC.Provider>
+    </ActionsC.Provider>
+  );
 }
 
 /** Display helpers shared by the UI. */

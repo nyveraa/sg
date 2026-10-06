@@ -1,33 +1,44 @@
 "use client";
 
 import { memo, useEffect, useState } from "react";
-import { AnimatePresence, motion } from "motion/react";
-import { Check, CheckCheck, Copy, Mountain, Pencil, Reply, RotateCcw, Scissors, Scroll, Trash2 } from "lucide-react";
-import { useOnyx } from "@/lib/client/store";
+import { AnimatePresence, animate, motion, useMotionValue, useTransform } from "motion/react";
+import { AlertCircle, Check, CheckCheck, Clock, Copy, Forward, Mountain, Pencil, Reply, RotateCcw, Scissors, Scroll, Trash2 } from "lucide-react";
+import { useActions } from "@/lib/client/store";
 import { sfx } from "@/lib/client/sound";
-import type { BallData, C4Data, EffectData, FlipData, Message, PollData, PromptData, RollData, RpsData, RpsPick, TttData, User } from "@/lib/types";
+import type { Prefs } from "@/lib/prefs";
+import type { BallData, C4Data, EffectData, FlipData, Message, PollData, PromptData, RollData, RpsData, RpsPick, SpinData, TttData, User } from "@/lib/types";
 import { Avatar } from "./Avatar";
 import { VoiceBubble } from "./Voice";
 
 const QUICK = ["❤️", "😂", "🔥", "👍", "😮", "💀"];
-const URL_RE = /(https?:\/\/[^\s<]+[^\s<.,;:!?)"'])/g;
 const EMOJI_ONLY = /^(?:\p{Extended_Pictographic}(?:️|‍\p{Extended_Pictographic})*\s*){1,3}$/u;
 const EFFECT_ICON = { confetti: "🎉", hearts: "💜", fire: "🔥", boom: "💥", snow: "❄️", stars: "✨" } as const;
+const TOKEN = /(```[\s\S]*?```|`[^`\n]+`|\*[^*\n]+\*|_[^_\n]+_|~[^~\n]+~|https?:\/\/[^\s<]+[^\s<.,;:!?)"']|@[a-z0-9_]{3,20})/g;
 
 export const clock = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 
-function Linkified({ text }: { text: string }) {
+/** Lightweight formatting: *bold* _italic_ ~strike~ `code` ```blocks``` links and @mentions. */
+function RichText({ text }: { text: string }) {
   return (
     <>
-      {text.split(URL_RE).map((part, i) =>
-        i % 2 ? <a key={i} href={part} target="_blank" rel="noopener noreferrer" className="underline underline-offset-2 opacity-90 hover:opacity-100">{part}</a> : part)}
+      {text.split(TOKEN).map((part, i) => {
+        if (i % 2 === 0) return part;
+        if (part.startsWith("```")) return <code key={i} className="my-1 block overflow-x-auto rounded-lg bg-black/40 px-3 py-2 font-mono text-[12.5px] whitespace-pre text-white/90">{part.slice(3, -3).replace(/^\n/, "")}</code>;
+        if (part.startsWith("`")) return <code key={i} className="rounded bg-black/30 px-1.5 py-0.5 font-mono text-[0.85em]">{part.slice(1, -1)}</code>;
+        if (part.startsWith("*")) return <strong key={i} className="font-semibold">{part.slice(1, -1)}</strong>;
+        if (part.startsWith("_")) return <em key={i}>{part.slice(1, -1)}</em>;
+        if (part.startsWith("~")) return <s key={i} className="opacity-70">{part.slice(1, -1)}</s>;
+        if (part.startsWith("@")) return <b key={i} className="font-semibold underline decoration-current/30 underline-offset-2">{part}</b>;
+        return <a key={i} href={part} target="_blank" rel="noopener noreferrer" className="underline underline-offset-2 opacity-90 hover:opacity-100">{part}</a>;
+      })}
     </>
   );
 }
 
 type Props = {
   m: Message; mine: boolean; sender?: User; showName: boolean; showAvatar: boolean; tail: boolean;
-  seen?: string; onReply: (m: Message) => void; onImage: (src: string) => void; highlight?: string;
+  seen?: string; seenBy?: string; onReply: (m: Message) => void; onForward: (m: Message) => void; onImage: (src: string) => void;
+  highlight?: string; users: Record<string, User>; meId: string; bubbleStyle: Prefs["bubbles"];
 };
 
 export const MessageView = memo(function MessageView(p: Props) {
@@ -46,7 +57,7 @@ function SystemLine({ m, sender }: { m: Message; sender?: User }) {
 }
 
 function EffectLine({ m, sender, mine }: { m: Message; sender?: User; mine: boolean }) {
-  const { fxRef } = useOnyx();
+  const { fxRef } = useActions();
   const effect = (m.data as EffectData | null)?.effect;
   if (!effect) return null;
   return (
@@ -60,21 +71,23 @@ function EffectLine({ m, sender, mine }: { m: Message; sender?: User; mine: bool
   );
 }
 
-function Bubble({ m, mine, sender, showName, showAvatar, tail, seen, onReply, onImage, highlight }: Props) {
-  const { s, react, edit, remove, toast } = useOnyx();
+function Bubble({ m, mine, sender, showName, showAvatar, tail, seen, seenBy, onReply, onForward, onImage, highlight, users, meId, bubbleStyle }: Props) {
+  const { react, edit, remove, toast, retry, discard } = useActions();
   const [open, setOpen] = useState(false); // toolbar pinned (touch)
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(m.body);
-  const me = s.me!;
   const emojiOnly = m.kind === "text" && !m.deleted && EMOJI_ONLY.test(m.body.trim());
   const rich = !["text", "image", "voice"].includes(m.kind);
-  const solid = mine && !rich; // light bubble → dark ink inside
+  const light = mine && !rich && bubbleStyle !== "outline"; // light bubble → dark ink inside
+  const canForward = (m.kind === "text" || m.kind === "image") && !m.pending && !m.failed;
 
   const shape = `rounded-[22px] ${mine ? (tail ? "rounded-br-[6px]" : "") : tail ? "rounded-bl-[6px]" : ""}`;
-  const skin = solid ? "bg-gradient-to-br from-white to-[#c9c9cf] text-black shadow-[0_14px_40px_-16px_rgb(255_255_255/.45)]"
+  const skin = light
+    ? bubbleStyle === "solid" ? "bg-[var(--acc-a)] text-black" : "bg-gradient-to-br from-[var(--acc-a)] to-[var(--acc-b)] text-black shadow-[0_14px_40px_-16px_rgb(var(--acc-glow)/.45)]"
+    : mine && !rich ? "border border-white/60 bg-white/[0.03] text-white"
     : rich ? `bg-gradient-to-br from-[#121214] to-[#09090a] border ${mine ? "border-white/40" : "border-white/12"}`
     : "bg-gradient-to-br from-[#17171a] to-[#0b0b0d] border border-white/10";
-  const ink = solid ? "text-black/50" : "text-white/45";
+  const ink = light ? "text-black/50" : "text-white/45";
 
   async function saveEdit() {
     const body = draft.trim();
@@ -89,8 +102,8 @@ function Bubble({ m, mine, sender, showName, showAvatar, tail, seen, onReply, on
       <div className={`flex max-w-[80%] min-w-0 flex-col ${mine ? "items-end" : "items-start"}`}>
         {showName && !mine && <span className="mb-1.5 ml-1 font-display text-[15px] text-white/80">{sender?.displayName}</span>}
 
-        <div className="relative" onClick={() => setOpen((v) => !v)}>
-          {!m.deleted && !editing && (
+        <div className={`relative transition-opacity ${m.pending ? "opacity-60" : ""}`} onClick={() => setOpen((v) => !v)}>
+          {!m.deleted && !editing && !m.pending && !m.failed && (
             <div className={`absolute -top-11 z-20 flex items-center rounded-full border border-white/15 bg-black/95 p-1 shadow-2xl backdrop-blur transition ${mine ? "right-0" : "left-0"} ${
               open ? "scale-100 opacity-100" : "pointer-events-none scale-95 opacity-0 group-hover:pointer-events-auto group-hover:scale-100 group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:scale-100 group-focus-within:opacity-100"}`}>
               {QUICK.map((e) => (
@@ -99,6 +112,7 @@ function Bubble({ m, mine, sender, showName, showAvatar, tail, seen, onReply, on
               ))}
               <span className="mx-1 h-4 w-px bg-white/15" />
               <Tool label="Reply" onClick={() => { onReply(m); setOpen(false); }}><Reply size={14} /></Tool>
+              {canForward && <Tool label="Forward" onClick={() => { onForward(m); setOpen(false); }}><Forward size={14} /></Tool>}
               {m.kind === "text" && <Tool label="Copy" onClick={() => { void navigator.clipboard?.writeText(m.body); toast("Copied", "ok"); setOpen(false); }}><Copy size={14} /></Tool>}
               {mine && m.kind === "text" && <Tool label="Edit" onClick={() => { setDraft(m.body); setEditing(true); setOpen(false); }}><Pencil size={14} /></Tool>}
               {mine && <Tool label="Delete" onClick={() => remove(m.id)}><Trash2 size={14} /></Tool>}
@@ -110,12 +124,12 @@ function Bubble({ m, mine, sender, showName, showAvatar, tail, seen, onReply, on
           ) : emojiOnly ? (
             <div className="px-1 text-5xl leading-none">{m.body}</div>
           ) : (
-            <div className={`${shape} ${skin} ${m.kind === "image" ? "p-1" : rich ? "p-5" : "px-[18px] py-3"}`}>
+            <div className={`${shape} ${skin} ${m.failed ? "!border-red-400/60" : ""} ${m.kind === "image" ? "p-1" : rich ? "p-5" : "px-[18px] py-3"}`}>
               {m.replyTo && (
                 <button onClick={(e) => { e.stopPropagation(); const el = document.getElementById(`m-${m.replyTo!.id}`); el?.scrollIntoView({ behavior: "smooth", block: "center" });
                   el?.animate([{ background: "rgb(255 255 255 / .1)" }, { background: "transparent" }], { duration: 1200 }); }}
-                  className={`mb-2.5 block w-full rounded-xl border-l-2 px-3 py-1.5 text-left text-xs ${solid ? "border-black/60 bg-black/[0.06]" : "border-white/60 bg-white/[0.06]"}`}>
-                  <b className="mb-0.5 block font-display text-[13px] font-medium opacity-90">{s.users[m.replyTo.senderId]?.displayName ?? "Someone"}</b>
+                  className={`mb-2.5 block w-full rounded-xl border-l-2 px-3 py-1.5 text-left text-xs ${light ? "border-black/60 bg-black/[0.06]" : "border-white/60 bg-white/[0.06]"}`}>
+                  <b className="mb-0.5 block font-display text-[13px] font-medium opacity-90">{users[m.replyTo.senderId]?.displayName ?? "Someone"}</b>
                   <span className="line-clamp-1 opacity-65">{m.replyTo.kind === "image" ? "Photo" : m.replyTo.body || "…"}</span>
                 </button>
               )}
@@ -127,8 +141,8 @@ function Bubble({ m, mine, sender, showName, showAvatar, tail, seen, onReply, on
                   <div className="mt-1.5 flex justify-end gap-4 text-xs"><button onClick={() => setEditing(false)}>Cancel</button><button onClick={saveEdit} className="font-bold">Save</button></div>
                 </div>
               ) : (
-                <p className="text-[15.5px] leading-[1.5] break-words whitespace-pre-wrap">
-                  {highlight ? <Highlight text={m.body} q={highlight} /> : <Linkified text={m.body} />}
+                <p className="msg-text text-[15.5px] leading-[1.5] break-words whitespace-pre-wrap">
+                  {highlight ? <Highlight text={m.body} q={highlight} /> : <RichText text={m.body} />}
                 </p>
               ))}
               {m.kind === "image" && (
@@ -136,32 +150,42 @@ function Bubble({ m, mine, sender, showName, showAvatar, tail, seen, onReply, on
                 <img src={m.body} alt="Shared image" loading="lazy" onClick={(e) => { e.stopPropagation(); onImage(m.body); }}
                   className="max-h-80 max-w-full cursor-zoom-in rounded-[18px] object-cover transition hover:brightness-110" />
               )}
-              {m.kind === "voice" && <VoiceBubble m={m} mine={mine} />}
+              {m.kind === "voice" && <VoiceBubble m={m} mine={light} />}
               {m.kind === "roll" && <Roll m={m} who={mine ? "You" : sender?.displayName} />}
               {m.kind === "flip" && <Flip m={m} who={mine ? "You" : sender?.displayName} />}
               {m.kind === "ball" && <Ball m={m} />}
-              {m.kind === "poll" && <Poll m={m} users={s.users} meId={me.id} />}
-              {m.kind === "ttt" && <Ttt m={m} users={s.users} meId={me.id} />}
-              {m.kind === "c4" && <ConnectFour m={m} users={s.users} meId={me.id} />}
-              {m.kind === "rps" && <Rps m={m} users={s.users} meId={me.id} />}
+              {m.kind === "poll" && <Poll m={m} users={users} meId={meId} />}
+              {m.kind === "ttt" && <Ttt m={m} users={users} meId={meId} />}
+              {m.kind === "c4" && <ConnectFour m={m} users={users} meId={meId} />}
+              {m.kind === "rps" && <Rps m={m} users={users} meId={meId} />}
+              {m.kind === "spin" && <Spin m={m} users={users} />}
               {m.kind === "prompt" && <Prompt m={m} who={mine ? "You" : sender?.displayName} />}
               {m.kind !== "image" && !editing && (
                 <div className={`mt-1.5 flex items-center justify-end gap-1.5 text-[10.5px] tracking-wide ${ink}`}>
-                  {m.editedAt && <span>edited ·</span>}<span>{clock(m.createdAt)}</span>
+                  {m.editedAt && <span>edited ·</span>}
+                  {m.pending ? <Clock size={10} aria-label="Sending" /> : <span>{clock(m.createdAt)}</span>}
                 </div>
               )}
             </div>
           )}
         </div>
 
+        {m.failed && (
+          <div className="mt-1.5 mr-1 flex items-center gap-3 text-[12px] text-red-300/90" role="alert">
+            <AlertCircle size={13} /> Not sent
+            <button onClick={() => retry(m.id)} className="underline underline-offset-2 hover:text-white">Retry</button>
+            <button onClick={() => discard(m.convId, m.id)} className="text-mute underline underline-offset-2 hover:text-white">Delete</button>
+          </div>
+        )}
+
         {m.reactions.length > 0 && (
           <div className={`-mt-2 flex flex-wrap gap-1 ${mine ? "mr-2 justify-end" : "ml-2"} relative z-10`}>
             <AnimatePresence initial={false}>
               {m.reactions.map((r) => {
-                const meIn = r.userIds.includes(me.id);
+                const meIn = r.userIds.includes(meId);
                 return (
                   <motion.button key={r.emoji} initial={{ scale: 0, rotate: -20 }} animate={{ scale: 1, rotate: 0 }} exit={{ scale: 0 }} whileTap={{ scale: 0.85 }}
-                    onClick={() => react(m.id, r.emoji)} title={r.userIds.map((id) => s.users[id]?.displayName).filter(Boolean).join(", ")}
+                    onClick={() => react(m.id, r.emoji)} title={r.userIds.map((id) => users[id]?.displayName).filter(Boolean).join(", ")}
                     className={`flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs ${meIn ? "border-white bg-white text-black" : "border-white/20 bg-black text-white"}`}>
                     <span>{r.emoji}</span><span className="text-[11px]">{r.userIds.length}</span>
                   </motion.button>
@@ -172,7 +196,7 @@ function Bubble({ m, mine, sender, showName, showAvatar, tail, seen, onReply, on
         )}
 
         {seen && (
-          <motion.span initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} className="mt-1.5 mr-1 flex items-center gap-1.5 text-[11.5px] text-mute italic">
+          <motion.span initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} title={seenBy} className="mt-1.5 mr-1 flex items-center gap-1.5 text-[11.5px] text-mute italic">
             {seen.startsWith("Seen") ? <CheckCheck size={12} className="text-white" /> : <Check size={12} />}{seen}
           </motion.span>
         )}
@@ -251,8 +275,47 @@ function Ball({ m }: { m: Message }) {
   );
 }
 
+/** Spin the wheel: members sit around a ring; it whirls and lands on the winner at the top. */
+function Spin({ m, users }: { m: Message; users: Record<string, User> }) {
+  const d = m.data as SpinData;
+  const fresh = useFresh(m.createdAt, 5000);
+  const n = d.memberIds.length;
+  const win = Math.max(0, d.memberIds.indexOf(d.winnerId));
+  const final = 360 * 4 - win * (360 / n);
+  const angle = useMotionValue(fresh ? 0 : final % 360);
+  const upright = useTransform(angle, (a) => -a);
+  const [done, setDone] = useState(!fresh);
+  useEffect(() => {
+    if (!fresh) return;
+    const c = animate(angle, final, { duration: 3, ease: [0.12, 0.7, 0.1, 1], onComplete: () => setDone(true) });
+    return () => c.stop();
+  }, [fresh, angle, final]);
+  const R = 62;
+  return (
+    <div className="min-w-[250px]">
+      <div className="label mb-3">The wheel</div>
+      <div className="mb-1 font-display text-[22px] leading-tight">{d.question}</div>
+      <div className="relative mx-auto my-4 h-[170px] w-[170px]">
+        <div className="absolute inset-0 rounded-full border border-white/20 bg-[radial-gradient(circle,#161618,#050506_70%)]" />
+        <div className="absolute -top-1 left-1/2 z-10 h-3 w-3 -translate-x-1/2 rotate-45 bg-white" aria-hidden />
+        <motion.div className="absolute inset-0" style={{ rotate: angle }}>
+          {d.memberIds.map((id, i) => {
+            const a = ((i * 360) / n - 90) * (Math.PI / 180);
+            return (
+              <motion.div key={id} className="absolute" style={{ left: 85 + Math.cos(a) * R - 19, top: 85 + Math.sin(a) * R - 19, rotate: upright }}>
+                <Avatar user={users[id]} size={38} ring={done && id === d.winnerId} className={done && id === d.winnerId ? "scale-110 shadow-[0_0_24px_-2px_#fff]" : done ? "opacity-45" : ""} />
+              </motion.div>
+            );
+          })}
+        </motion.div>
+      </div>
+      <div role="status" className="text-center font-display text-2xl italic">{done ? `${users[d.winnerId]?.displayName ?? "Someone"}!` : "…"}</div>
+    </div>
+  );
+}
+
 function Poll({ m, users, meId }: { m: Message; users: Record<string, User>; meId: string }) {
-  const { act } = useOnyx();
+  const { act } = useActions();
   const d = m.data as PollData;
   const total = d.options.reduce((n, o) => n + o.votes.length, 0);
   return (
@@ -281,7 +344,7 @@ function Poll({ m, users, meId }: { m: Message; users: Record<string, User>; meI
 }
 
 function Ttt({ m, users, meId }: { m: Message; users: Record<string, User>; meId: string }) {
-  const { act } = useOnyx();
+  const { act } = useActions();
   const g = m.data as TttData;
   const nameX = users[g.x]?.displayName ?? "X";
   const nameO = g.o ? users[g.o]?.displayName ?? "O" : "Challenger";
@@ -307,7 +370,7 @@ function Ttt({ m, users, meId }: { m: Message; users: Record<string, User>; meId
 }
 
 function ConnectFour({ m, users, meId }: { m: Message; users: Record<string, User>; meId: string }) {
-  const { act } = useOnyx();
+  const { act } = useActions();
   const g = m.data as C4Data;
   const fresh = useFresh(m.createdAt, 8000);
   const nameX = users[g.x]?.displayName ?? "X";
@@ -346,7 +409,7 @@ function ConnectFour({ m, users, meId }: { m: Message; users: Record<string, Use
 const RPS: Record<RpsPick, { label: string; icon: typeof Mountain }> = { r: { label: "Rock", icon: Mountain }, p: { label: "Paper", icon: Scroll }, s: { label: "Scissors", icon: Scissors } };
 
 function Rps({ m, users, meId }: { m: Message; users: Record<string, User>; meId: string }) {
-  const { act } = useOnyx();
+  const { act } = useActions();
   const d = m.data as RpsData;
   const iPicked = d.picked.includes(meId);
   const full = d.players.length >= 2 && !d.players.includes(meId);
