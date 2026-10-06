@@ -864,6 +864,10 @@ export function logoutEverywhere(userId: string) {
 /** Permanently removes the account, its messages, posts and DMs. Group-mates just see you leave. */
 export function deleteAccount(userId: string, password: string) {
   checkPassword(userId, password);
+  removeUser(userId);
+}
+
+export function removeUser(userId: string) {
   const friends = friendIds(userId);
   const dms = all<{ id: string }>("SELECT c.id FROM conversations c JOIN members m ON m.conv_id = c.id WHERE m.user_id = ? AND c.kind = 'dm'", userId).map((r) => r.id);
   const groups = all<{ id: string }>("SELECT c.id FROM conversations c JOIN members m ON m.conv_id = c.id WHERE m.user_id = ? AND c.kind = 'group'", userId).map((r) => r.id);
@@ -902,4 +906,62 @@ export function exportData(userId: string) {
       kind: p.kind, at: new Date(p.created_at).toISOString(), text: p.body, hasImage: !!p.image,
     })),
   };
+}
+
+/* ───────────────────────────── admin ───────────────────────────── */
+
+const USERNAME_RE = /^[a-z0-9_]{3,20}$/;
+
+export function adminListUsers() {
+  return all<{
+    id: string; username: string; display_name: string; bio: string; created_at: number; last_seen: number | null;
+    friends: number; messages: number; sessions: number;
+  }>(
+    `SELECT u.id, u.username, u.display_name, u.bio, u.created_at, u.last_seen,
+       (SELECT COUNT(*) FROM friendships f WHERE f.user_id = u.id) AS friends,
+       (SELECT COUNT(*) FROM messages m WHERE m.sender_id = u.id AND m.deleted = 0) AS messages,
+       (SELECT COUNT(*) FROM sessions s WHERE s.user_id = u.id AND s.expires_at > ?) AS sessions
+     FROM users u ORDER BY u.created_at DESC`, Date.now())
+    .map((r) => ({
+      id: r.id, username: r.username, displayName: r.display_name, bio: r.bio, createdAt: r.created_at,
+      lastSeen: r.last_seen, online: isOnline(r.id), friends: r.friends, messages: r.messages, sessions: r.sessions,
+    }));
+}
+
+export function adminUserDetail(id: string) {
+  if (!one("SELECT 1 AS x FROM users WHERE id = ?", id)) throw new ApiError(404, "No such user");
+  return {
+    friends: listFriends(id).map((f) => ({ username: f.user.username, displayName: f.user.displayName, since: f.since })),
+    groups: all<{ title: string | null }>(
+      "SELECT c.title FROM conversations c JOIN members m ON m.conv_id = c.id WHERE m.user_id = ? AND c.kind = 'group'", id).map((g) => g.title ?? "Group"),
+    posts: one<{ n: number }>("SELECT COUNT(*) AS n FROM posts WHERE user_id = ?", id)?.n ?? 0,
+    invitesMade: one<{ n: number }>("SELECT COUNT(*) AS n FROM invites WHERE owner_id = ?", id)?.n ?? 0,
+  };
+}
+
+export function adminUpdateUser(id: string, patch: { username?: string; displayName?: string; bio?: string; password?: string }) {
+  const cur = one<{ username: string }>("SELECT username FROM users WHERE id = ?", id);
+  if (!cur) throw new ApiError(404, "No such user");
+  const uname = patch.username?.toLowerCase();
+  if (uname !== undefined) {
+    if (!USERNAME_RE.test(uname)) throw new ApiError(400, "Username: 3–20 letters, numbers or underscores");
+    if (uname !== cur.username && one("SELECT 1 AS x FROM users WHERE username = ?", uname)) throw new ApiError(409, "That username is taken");
+  }
+  if (patch.password && patch.password.length < 8) throw new ApiError(400, "Password must be at least 8 characters");
+  tx(() => {
+    if (uname !== undefined) run("UPDATE users SET username = ? WHERE id = ?", uname, id);
+    if (patch.displayName) run("UPDATE users SET display_name = ? WHERE id = ?", patch.displayName, id);
+    if (patch.bio !== undefined) run("UPDATE users SET bio = ? WHERE id = ?", patch.bio, id);
+    if (patch.password) {
+      const { salt, hash } = hashPassword(patch.password);
+      run("UPDATE users SET pass_salt = ?, pass_hash = ? WHERE id = ?", salt, hash, id);
+      run("DELETE FROM sessions WHERE user_id = ?", id);
+    }
+  });
+  emitTo(audience(id), { type: "user", user: toUser(id)! });
+  emitTo([id], { type: "me", me: toMe(id) });
+}
+
+export function adminSignOutEverywhere(id: string) {
+  run("DELETE FROM sessions WHERE user_id = ?", id);
 }

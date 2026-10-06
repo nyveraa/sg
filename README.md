@@ -30,3 +30,12 @@ npm run seed && npm run test:e2e   # 35 browser checks in headless Chrome (needs
 ```
 Dev conveniences: `ONYX_NO_RATELIMIT=1 npm run dev` disables rate limits (ignored in production);
 `node tests/shot.mjs /app out.png --login=ekta` screenshots any page with headless Chrome.
+
+## Admin
+Set `ONYX_ADMIN_PASSWORD` (8+ characters) in the server's environment, then open `/admin` from anywhere and sign in with it.
+You can see every user, add/delete accounts, rename usernames, set new passwords, sign users out of all devices,
+and "Sign in as" a user. `npm run test:api` needs the server started with `ONYX_ADMIN_PASSWORD=admin-pass-123`.
+
+## Staying signed in
+Sessions last 180 days and renew while you use the app. They live in the database, so the database must persist:
+set `ONYX_DB` to a path on a persistent disk (Render free has none — every deploy wipes accounts and sign-ins).
